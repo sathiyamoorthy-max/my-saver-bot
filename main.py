@@ -6,7 +6,7 @@ from pyrogram.errors import SessionPasswordNeeded
 from flask import Flask
 from threading import Thread
 
-# --- 1. DUMMY WEB SERVER (Render-ல் 24/7 இயங்க) ---
+# --- 1. DUMMY WEB SERVER ---
 app = Flask(__name__)
 
 @app.route('/')
@@ -26,7 +26,6 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 
 bot = Client("Bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
-# தற்காலிகமாக லாகின் விவரங்களைச் சேமிக்க
 USER_SESSIONS = {}
 TEMP_DATA = {}
 
@@ -60,7 +59,6 @@ async def handle_inputs(client, message: Message):
     chat_id = message.chat.id
     text = message.text.strip()
 
-    # Login Process (Phone number & OTP)
     if chat_id in TEMP_DATA:
         step = TEMP_DATA[chat_id].get("step")
 
@@ -68,7 +66,6 @@ async def handle_inputs(client, message: Message):
             phone = text
             TEMP_DATA[chat_id]["phone"] = phone
             try:
-                # Userbot கிளின்க உருவாக்கல்
                 userbot = Client(f"user_{chat_id}", api_id=API_ID, api_hash=API_HASH, in_memory=True)
                 await userbot.connect()
                 sent_code = await userbot.send_code(phone)
@@ -89,11 +86,11 @@ async def handle_inputs(client, message: Message):
             try:
                 await userbot.sign_in(phone, phone_code_hash, otp)
                 USER_SESSIONS[chat_id] = userbot
-                await message.reply_text("🎉 கணக்கு வெற்றிகரமாக இணைக்கப்பட்டது! (Account Login Successfully)\n\nஇப்போது எந்தவொரு Restricted Channel Link-ஐயும் அனுப்பவும்.")
+                await message.reply_text("🎉 கணக்கு வெற்றிகரமாக இணைக்கப்பட்டது!\n\nஇப்போது எந்தவொரு Restricted Channel Link-ஐயும் அனுப்பவும்.")
                 del TEMP_DATA[chat_id]
             except SessionPasswordNeeded:
                 TEMP_DATA[chat_id]["step"] = "2fa"
-                await message.reply_text("🔒 உங்கள் கணக்கிற்கு Two-Step Verification (Password) உள்ளது. தயவுசெய்து உங்கள் பாஸ்வோர்டை அனுப்பவும்:")
+                await message.reply_text("🔒 உங்கள் கணக்கிற்கு Two-Step Verification (Password) உள்ளது. பாஸ்வோர்டை அனுப்பவும்:")
             except Exception as e:
                 await message.reply_text(f"❌ OTP தவறு: {e}")
                 del TEMP_DATA[chat_id]
@@ -111,7 +108,7 @@ async def handle_inputs(client, message: Message):
                 del TEMP_DATA[chat_id]
         return
 
-    # Link Processing & Downloading (Restricted Bypass)
+    # Link Processing & Downloading (Advanced Resolver)
     if "t.me/" in text:
         if chat_id not in USER_SESSIONS:
             await message.reply_text("⚠️ முதலில் உங்கள் கணக்கை இணைக்க **/login** கட்டளையைப் பயன்படுத்தவும்!")
@@ -122,25 +119,32 @@ async def handle_inputs(client, message: Message):
         
         try:
             link = text
+            
+            # எந்த வடிவத்திலுள்ள லிங்காக இருந்தாலும் துல்லியமாகப் பிரித்தெடுக்க
             if "/c/" in link:
                 parts = link.split("/c/")
                 sub_parts = parts[1].split("/")
                 chat_id_val = int("-100" + sub_parts[0])
-                msg_id = int(sub_parts[1])
+                msg_id = int(sub_parts[1].split("?")[0])
             else:
-                parts = link.split("/")
-                chat_id_val = parts[-2]
-                msg_id = int(parts[-1])
+                parsed_link = link.split("t.me/")[1].split("/")
+                if len(parsed_link) >= 2:
+                    chat_id_val = parsed_link[0]
+                    msg_id = int(parsed_link[1].split("?")[0])
+                else:
+                    await msg.edit_text("❌ தவறான லிங்க் வடிவம்.")
+                    return
 
-            # சேனல் தடையை மீறி மெசேஜ் பெறுதல்
+            # நேரடியாக Userbot மூலம் மெசேஜைப் பெற முயல்வது
             try:
                 target_msg = await userbot.get_messages(chat_id_val, msg_id)
             except Exception:
                 try:
-                    await userbot.join_chat(chat_id_val)
-                    target_msg = await userbot.get_messages(chat_id_val, msg_id)
+                    # ஒருவேளை கிடைக்கவில்லை எனில் முதலில் Chat-ஐ Resolve செய்வது
+                    chat_obj = await userbot.get_chat(chat_id_val)
+                    target_msg = await userbot.get_messages(chat_obj.id, msg_id)
                 except Exception as ex:
-                    await msg.edit_text(f"❌ இந்தச் சேனலை அணுக முடியவில்லை: {ex}")
+                    await msg.edit_text(f"❌ பிழை: {ex}\n\n*குறிப்பு:* இந்தச் சேனலில் உங்கள் லாகின் கணக்கு உறுப்பினராக இருக்க வேண்டும்.")
                     return
 
             if not target_msg or target_msg.empty:
@@ -171,7 +175,7 @@ async def handle_inputs(client, message: Message):
 # --- 3. MAIN RUNNER ---
 async def main():
     await bot.start()
-    print("✅ Advanced Login Bot வெற்றிகரமாக இயங்குகிறது!")
+    print("✅ Advanced Resolver Bot வெற்றிகரமாக இயங்குகிறது!")
     from pyrogram import idle
     await idle()
 
