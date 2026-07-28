@@ -64,24 +64,35 @@ async def handle_inputs(client, message: Message):
 
         if step == "phone":
             phone = text
-            TEMP_DATA[chat_id]["phone"] = phone
             try:
+                # புதிய செஷன் உருவாக்கல்
                 userbot = Client(f"user_{chat_id}", api_id=API_ID, api_hash=API_HASH, in_memory=True)
                 await userbot.connect()
                 sent_code = await userbot.send_code(phone)
-                TEMP_DATA[chat_id]["userbot"] = userbot
-                TEMP_DATA[chat_id]["phone_code_hash"] = sent_code.phone_code_hash
-                TEMP_DATA[chat_id]["step"] = "otp"
-                await message.reply_text("📩 OTP அனுப்பப்பட்டுள்ளது!\nதயவுசெய்து OTP-ஐ இடைவெளிவிட்டு அனுப்பவும் (உதாரணம்: `1 2 3 4 5`).")
+                
+                # தரவுகளை தற்காலிகமாக சேமித்தல்
+                TEMP_DATA[chat_id] = {
+                    "userbot": userbot,
+                    "phone": phone,
+                    "phone_code_hash": sent_code.phone_code_hash,
+                    "step": "otp"
+                }
+                await message.reply_text("📩 டெலிகிராமிற்கு OTP அனுப்பப்பட்டுள்ளது!\n\nதயவுசெய்து உங்கள் டெலிகிராம் ஆப்பில் 'Telegram' என்ற அதிகாரப்பூர்வ சாட்டைப் பார்த்து OTP-ஐ இடைவெளிவிட்டு அனுப்பவும் (உதாரணம்: `1 2 3 4 5`).")
             except Exception as e:
                 await message.reply_text(f"❌ பிழை: {e}")
-                del TEMP_DATA[chat_id]
+                if chat_id in TEMP_DATA:
+                    del TEMP_DATA[chat_id]
 
         elif step == "otp":
             otp = text.replace(" ", "")
-            userbot = TEMP_DATA[chat_id]["userbot"]
-            phone = TEMP_DATA[chat_id]["phone"]
-            phone_code_hash = TEMP_DATA[chat_id]["phone_code_hash"]
+            data = TEMP_DATA.get(chat_id)
+            if not data:
+                await message.reply_text("❌ காலம் கடந்துவிட்டது. மீண்டும் /login கொடுக்கவும்.")
+                return
+
+            userbot = data["userbot"]
+            phone = data["phone"]
+            phone_code_hash = data["phone_code_hash"]
 
             try:
                 await userbot.sign_in(phone, phone_code_hash, otp)
@@ -92,12 +103,15 @@ async def handle_inputs(client, message: Message):
                 TEMP_DATA[chat_id]["step"] = "2fa"
                 await message.reply_text("🔒 உங்கள் கணக்கிற்கு Two-Step Verification (Password) உள்ளது. பாஸ்வோர்டை அனுப்பவும்:")
             except Exception as e:
-                await message.reply_text(f"❌ OTP தவறு: {e}")
+                await message.reply_text(f"❌ OTP தவறு அல்லது காலாவதியானது: {e}")
                 del TEMP_DATA[chat_id]
 
         elif step == "2fa":
             password = text
-            userbot = TEMP_DATA[chat_id]["userbot"]
+            data = TEMP_DATA.get(chat_id)
+            if not data:
+                return
+            userbot = data["userbot"]
             try:
                 await userbot.check_password(password)
                 USER_SESSIONS[chat_id] = userbot
@@ -108,7 +122,7 @@ async def handle_inputs(client, message: Message):
                 del TEMP_DATA[chat_id]
         return
 
-    # Link Processing & Downloading (Advanced Resolver)
+    # Link Processing & Downloading
     if "t.me/" in text:
         if chat_id not in USER_SESSIONS:
             await message.reply_text("⚠️ முதலில் உங்கள் கணக்கை இணைக்க **/login** கட்டளையைப் பயன்படுத்தவும்!")
@@ -119,8 +133,6 @@ async def handle_inputs(client, message: Message):
         
         try:
             link = text
-            
-            # எந்த வடிவத்திலுள்ள லிங்காக இருந்தாலும் துல்லியமாகப் பிரித்தெடுக்க
             if "/c/" in link:
                 parts = link.split("/c/")
                 sub_parts = parts[1].split("/")
@@ -135,12 +147,10 @@ async def handle_inputs(client, message: Message):
                     await msg.edit_text("❌ தவறான லிங்க் வடிவம்.")
                     return
 
-            # நேரடியாக Userbot மூலம் மெசேஜைப் பெற முயல்வது
             try:
                 target_msg = await userbot.get_messages(chat_id_val, msg_id)
             except Exception:
                 try:
-                    # ஒருவேளை கிடைக்கவில்லை எனில் முதலில் Chat-ஐ Resolve செய்வது
                     chat_obj = await userbot.get_chat(chat_id_val)
                     target_msg = await userbot.get_messages(chat_obj.id, msg_id)
                 except Exception as ex:
@@ -175,7 +185,7 @@ async def handle_inputs(client, message: Message):
 # --- 3. MAIN RUNNER ---
 async def main():
     await bot.start()
-    print("✅ Advanced Resolver Bot வெற்றிகரமாக இயங்குகிறது!")
+    print("✅ Fixed Login Bot வெற்றிகரமாக இயங்குகிறது!")
     from pyrogram import idle
     await idle()
 
