@@ -1,25 +1,10 @@
 main.py
 import os
 import asyncio
-from threading import Thread
-from http.server import BaseHTTPRequestHandler, HTTPServer
 from pyrogram import Client, filters
+from aiohttp import web
 
-# --- Web Server Trick for Render Free Tier ---
-class DummyHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"Bot is running!")
-
-def keep_alive():
-    server = HTTPServer(('0.0.0.0', 8080), DummyHandler)
-    server.serve_forever()
-
-Thread(target=keep_alive, daemon=True).start()
-# ---------------------------------------------
-
-# Render Keys
+# Render-ல் இருந்து Keys-ஐ எடுக்கும்
 API_ID = int(os.environ.get("API_ID", 0))
 API_HASH = os.environ.get("API_HASH", "")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
@@ -53,7 +38,7 @@ async def process_link(client, message):
             await msg.edit_text("❌ மெசேஜ் கிடைக்கவில்லை!")
             return
 
-        await msg.edit_text("📥 டவுன்லோட் ஆகிறது... (காத்திருக்கவும்)")
+        await msg.edit_text("📥 டவுன்லோட் ஆகிறது... (கொஞ்சம் காத்திருக்கவும்)")
         
         if target_msg.media:
             file_path = await userbot.download_media(target_msg)
@@ -67,9 +52,22 @@ async def process_link(client, message):
     except Exception as e:
         await msg.edit_text(f"❌ Error: {e}")
 
+# --- DUMMY WEB SERVER FOR RENDER (இலவசமாக இயங்க) ---
+async def web_server():
+    async def handle(request):
+        return web.Response(text="Bot is Running Successfully!")
+    app = web.Application()
+    app.router.add_get('/', handle)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.environ.get("PORT", 8080))
+    site = web.TCPSite(runner, '0.0.0.0', port)
+    await site.start()
+
 async def main():
     await userbot.start()
     await bot.start()
+    await web_server() # இது Render-க்கு Website போலக் காட்டும்
     print("✅ Bot வெற்றிகரமாக இயங்குகிறது!")
     await asyncio.Event().wait()
 
