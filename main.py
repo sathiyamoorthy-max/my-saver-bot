@@ -1,10 +1,11 @@
 import os
 import asyncio
 from pyrogram import Client, filters
+from pyrogram.types import Message
 from flask import Flask
 from threading import Thread
 
-# --- 1. DUMMY WEB SERVER (Render-ல் இலவசமாக இயங்க) ---
+# --- 1. DUMMY WEB SERVER ---
 app = Flask(__name__)
 
 @app.route('/')
@@ -28,43 +29,53 @@ userbot = Client("Userbot", api_id=API_ID, api_hash=API_HASH, session_string=STR
 
 @bot.on_message(filters.command("start"))
 async def start(client, message):
-    await message.reply_text("👋 வணக்கம்! Restricted / Public Channel Link-ஐ எனக்கு அனுப்பவும்.")
+    await message.reply_text("👋 வணக்கம்! எந்தவொரு Restricted Channel Link-ஐயும் எனக்கு அனுப்பவும்.")
 
 @bot.on_message(filters.text & filters.private)
-async def process_link(client, message):
+async def process_link(client, message: Message):
     link = message.text.strip()
     if "t.me/" not in link:
         await message.reply_text("❌ சரியான Message Link-ஐ அனுப்பவும்.")
         return
 
-    msg = await message.reply_text("⏳ பைலைத் தேடுகிறது...")
+    msg = await message.reply_text("⏳ சேனல் விவரங்களைத் தேடுகிறது...")
     try:
+        # லிங்கில் இருந்து Chat ID மற்றும் Message ID பிரித்தெடுத்தல்
         if "/c/" in link:
             parts = link.split("/c/")
             sub_parts = parts[1].split("/")
-            chat_id = int("-100" + sub_parts[0])
+            raw_chat_id = sub_parts[0]
+            chat_id = int("-100" + raw_chat_id)
             msg_id = int(sub_parts[1])
         else:
             parts = link.split("/")
             chat_id = parts[-2]
             msg_id = int(parts[-1])
 
-        # Restricted சேனல் தடையை மீறி மெசேஜைப் பெற
+        # மிக முக்கியம்: டெலிகிராம் சர்வரில் இருந்து சேனலின் உண்மையான Access-ஐ பெறுவது (Resolve)
         try:
-            target_msg = await userbot.get_messages(chat_id, msg_id)
+            chat_obj = await userbot.get_chat(chat_id)
         except Exception:
-            # ஒருவேளை நேரடி அணுகல் இல்லையெனில் Join செய்ய முயன்று எடுக்கும்
-            await userbot.join_chat(chat_id)
-            target_msg = await userbot.get_messages(chat_id, msg_id)
+            try:
+                # ஒருவேளை நேரடியாக கிடைக்கவில்லை எனில் Invite Link போல இணைக்க முயல்வது
+                if not str(chat_id).startswith("-100"):
+                    chat_obj = await userbot.join_chat(link.split("/")[-2])
+                else:
+                    chat_obj = await userbot.get_chat(chat_id)
+            except Exception as e:
+                await msg.edit_text(f"❌ சேனலை அணுக முடியவில்லை! Error: {e}")
+                return
+
+        await msg.edit_text("📥 பைல் டவுன்லோட் ஆகிறது... (கொஞ்சம் காத்திருக்கவும்)")
+
+        # பிரத்யேக மெசேஜ் பெறுதல்
+        target_msg = await userbot.get_messages(chat_obj.id, msg_id)
 
         if not target_msg or target_msg.empty:
-            await msg.edit_text("❌ மெசேஜ் கிடைக்கவில்லை அல்லது டெலிட் செய்யப்பட்டுவிட்டது!")
+            await msg.edit_text("❌ மெசேஜ் கிடைக்கவில்லை!")
             return
 
-        await msg.edit_text("📥 டவுன்லோட் ஆகிறது (Restricted Bypass)... கொஞ்சம் காத்திருக்கவும்")
-        
         if target_msg.media:
-            # தடையை மீறி டவுன்லோட் செய்ய
             file_path = await userbot.download_media(target_msg)
             await msg.edit_text("📤 உங்களுக்கு அனுப்புகிறேன்...")
             
@@ -88,7 +99,7 @@ async def process_link(client, message):
 async def main():
     await userbot.start()
     await bot.start()
-    print("✅ Bot with Restriction Bypass வெற்றிகரமாக இயங்குகிறது!")
+    print("✅ Advanced Resolver Bot வெற்றிகரமாக இயங்குகிறது!")
     from pyrogram import idle
     await idle()
 
