@@ -2,9 +2,24 @@ main.py
 import os
 import asyncio
 from pyrogram import Client, filters
-from aiohttp import web
+from flask import Flask
+from threading import Thread
 
-# Render-ல் இருந்து Keys-ஐ எடுக்கும்
+# --- 1. DUMMY WEB SERVER (Render-ல் இலவசமாக இயங்க) ---
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "Bot is Running Successfully on Render!"
+
+def run_server():
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host="0.0.0.0", port=port)
+
+# வெப் சர்வரை தனியாக ஒரு பின்னணியில் (Background Thread) இயக்குதல்
+Thread(target=run_server, daemon=True).start()
+
+# --- 2. BOT CONFIGURATION ---
 API_ID = int(os.environ.get("API_ID", 0))
 API_HASH = os.environ.get("API_HASH", "")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
@@ -44,7 +59,11 @@ async def process_link(client, message):
             file_path = await userbot.download_media(target_msg)
             await msg.edit_text("📤 உங்களுக்கு அனுப்புகிறேன்...")
             await client.send_document(message.chat.id, file_path, caption=target_msg.caption)
-            os.remove(file_path)
+            
+            # பைலை அனுப்பிய பின் சர்வரில் இருந்து அழித்தல்
+            if os.path.exists(file_path):
+                os.remove(file_path)
+                
         elif target_msg.text:
             await client.send_message(message.chat.id, target_msg.text)
         
@@ -52,24 +71,13 @@ async def process_link(client, message):
     except Exception as e:
         await msg.edit_text(f"❌ Error: {e}")
 
-# --- DUMMY WEB SERVER FOR RENDER (இலவசமாக இயங்க) ---
-async def web_server():
-    async def handle(request):
-        return web.Response(text="Bot is Running Successfully!")
-    app = web.Application()
-    app.router.add_get('/', handle)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    port = int(os.environ.get("PORT", 8080))
-    site = web.TCPSite(runner, '0.0.0.0', port)
-    await site.start()
-
+# --- 3. MAIN RUNNER ---
 async def main():
     await userbot.start()
     await bot.start()
-    await web_server() # இது Render-க்கு Website போலக் காட்டும்
     print("✅ Bot வெற்றிகரமாக இயங்குகிறது!")
-    await asyncio.Event().wait()
+    from pyrogram import idle
+    await idle()
 
 if __name__ == "__main__":
     loop = asyncio.get_event_loop()
