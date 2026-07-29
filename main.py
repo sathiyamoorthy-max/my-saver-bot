@@ -8,7 +8,7 @@ asyncio.set_event_loop(loop)
 
 from pyrogram import Client, filters
 from pyrogram.types import Message, BotCommand, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
-from pyrogram.errors import FloodWait, PeerIdInvalid
+from pyrogram.errors import FloodWait, PeerIdInvalid, ChannelPrivate
 from flask import Flask
 from threading import Thread
 
@@ -17,7 +17,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "✅ Ultimate Pro Max Bot is Running!"
+    return "✅ Ultimate Pro Max Bot v4 is Running!"
 
 def run_server():
     port = int(os.environ.get("PORT", 8080))
@@ -67,23 +67,21 @@ async def send_media_nicely(client, user_chat_id, target_msg, file_path):
     else:
         await client.send_document(dest_chat, file_path, caption=caption)
 
-# --- HELPER 2: Auto-Recovery ---
-async def get_message_with_recovery(client, chat_id_val, msg_ids):
+# --- HELPER 2: Check Access & Sync ---
+async def check_access_and_sync(client, chat_id_val, msg_obj):
     try:
-        return await client.get_messages(chat_id_val, msg_ids)
+        return await client.get_chat(chat_id_val)
     except PeerIdInvalid:
+        await msg_obj.edit_text("🔄 குரூப்பைக் கண்டுபிடிக்க முடியவில்லை! தேடுகிறது (Syncing)...")
         async for _ in client.get_dialogs(limit=500):
             pass
-        return await client.get_messages(chat_id_val, msg_ids)
-    except Exception as e:
-        chat_obj = await client.get_chat(chat_id_val)
-        return await client.get_messages(chat_obj.id, msg_ids)
+        return await client.get_chat(chat_id_val)
 
 # ================= START & MENU BUTTONS =================
 @bot.on_message(filters.command("start"))
 async def start(client, message):
     text = (
-        "🤖 **Pro Max Saver Bot (v3.0)**\n\n"
+        "🤖 **Pro Max Saver Bot (v4.0)**\n\n"
         "✨ **Welcome!** நான் உங்களுக்காக எந்தவொரு Restricted ஃபைலையும் பாதுகாப்பாக டவுன்லோட் செய்து தருவேன்.\n\n"
         "கீழே உள்ள பட்டன்களைப் பயன்படுத்தவும் அல்லது நேரடியாக ஒரு லிங்கை அனுப்பவும்!"
     )
@@ -108,7 +106,7 @@ async def cb_handler(client, query: CallbackQuery):
         await query.answer()
         
     elif data == "btn_clone":
-        await query.message.reply_text("♻️ **Clone Mode**\nகுரூப்பை முழுமையாக எடுக்க இப்படி டைப் செய்யவும்:\n`/clone <லிங்க்>`")
+        await query.message.reply_text("♻️ **Clone Mode**\nகுரூப்பை முழுமையாக எடுக்க லிங்கை அனுப்பவும்:\n`/clone https://t.me/c/...`")
         await query.answer()
         
     elif data == "btn_cancel":
@@ -152,9 +150,10 @@ async def clone_chat(client, message: Message):
 
     command_parts = message.text.split(maxsplit=1)
     if len(command_parts) < 2:
-        return await message.reply_text("⚠️ **பயன்பாடு:** `/clone <குரூப் லிங்க்>`")
+        return await message.reply_text("⚠️ **பயன்பாடு:** `/clone https://t.me/c/...`")
 
-    link = command_parts[1].strip()
+    # FIX: < > குறியீடுகளை நீக்குதல்
+    link = command_parts[1].strip().replace("<", "").replace(">", "")
     msg = await message.reply_text("🔄 ஆராய்கிறது...")
     
     try:
@@ -176,22 +175,20 @@ async def clone_chat(client, message: Message):
             else:
                 start_msg_id = int(parts[1])
 
+        # FIX: Group Access Check
         try:
-            last_msg_id = start_msg_id
-            async for m in userbot.get_chat_history(target_chat_id, limit=1):
-                last_msg_id = m.id
-        except PeerIdInvalid:
-            await msg.edit_text("🔄 குரூப்பைத் தேடுகிறது...")
-            async for _ in userbot.get_dialogs(limit=500):
-                pass
-            last_msg_id = start_msg_id
-            async for m in userbot.get_chat_history(target_chat_id, limit=1):
-                last_msg_id = m.id
+            await check_access_and_sync(userbot, target_chat_id, msg)
+        except Exception as e:
+            return await msg.edit_text(f"❌ **எரர்:** உங்களால் இந்த குரூப்பை அணுக முடியவில்லை! உங்கள் புதிய நம்பர் (Session) அந்த குரூப்பில் Join ஆகியுள்ளதா எனச் சரிபார்க்கவும்.\n`விவரம்: {e}`")
+
+        last_msg_id = start_msg_id
+        async for m in userbot.get_chat_history(target_chat_id, limit=1):
+            last_msg_id = m.id
 
         if start_msg_id > last_msg_id:
-            return await msg.edit_text("❌ லிங்க் தவறானது.")
+            return await msg.edit_text("❌ லிங்க் தவறானது அல்லது மெசேஜ் டெலீட் ஆகிவிட்டது.")
 
-        await msg.edit_text(f"🚀 **Clone Starts...**\n\nநிறுத்த `/cancel`")
+        await msg.edit_text(f"🚀 **Clone Starts...**\n• ID: {start_msg_id} முதல் {last_msg_id} வரை.\n\nநிறுத்த `/cancel`")
         ACTIVE_TASKS.append(chat_id)
         success_count = 0
         chunk_size = 200 
@@ -202,10 +199,10 @@ async def clone_chat(client, message: Message):
                 
             chunk_ids = list(range(i, min(i + chunk_size, last_msg_id + 1)))
             try:
-                messages_list = await get_message_with_recovery(userbot, target_chat_id, chunk_ids)
+                messages_list = await userbot.get_messages(target_chat_id, chunk_ids)
                 
                 for target_msg in messages_list:
-                    if chat_id not in ACTIVE_TASKS: # STRICT CANCEL CHECK
+                    if chat_id not in ACTIVE_TASKS:
                         break
                     if not target_msg or target_msg.empty:
                         continue
@@ -218,7 +215,7 @@ async def clone_chat(client, message: Message):
                     try:
                         if target_msg.media:
                             file_path = await userbot.download_media(target_msg)
-                            if chat_id not in ACTIVE_TASKS: # STRICT CANCEL CHECK BEFORE SENDING
+                            if chat_id not in ACTIVE_TASKS:
                                 if file_path and os.path.exists(file_path): os.remove(file_path)
                                 break
                             if file_path:
@@ -236,7 +233,8 @@ async def clone_chat(client, message: Message):
                         await asyncio.sleep(fw.value)
                     except Exception:
                         continue
-            except Exception:
+            except Exception as e:
+                await client.send_message(message.chat.id, f"⚠️ இடையில் ஒரு பிழை: {e}")
                 continue
         
         if chat_id in ACTIVE_TASKS:
@@ -250,7 +248,8 @@ async def clone_chat(client, message: Message):
 @bot.on_message(filters.text & filters.private & ~filters.command(["start", "clone", "cancel", "batch"]))
 async def handle_inputs(client, message: Message):
     chat_id = message.chat.id
-    text = message.text.strip()
+    # FIX: < > குறியீடுகளை நீக்குதல்
+    text = message.text.strip().replace("<", "").replace(">", "")
     if not userbot:
         return
 
@@ -284,21 +283,28 @@ async def handle_inputs(client, message: Message):
                     start_msg_id = int(first_parts[2]) if len(first_parts) == 3 else int(first_parts[1])
                     end_msg_id = int(last_parts[2]) if len(last_parts) == 3 else int(last_parts[1])
                 
-                ACTIVE_TASKS.append(chat_id)
                 status_msg = await message.reply_text(f"🚀 Batch டவுன்லோட் தொடங்குகிறது...")
+                
+                # FIX: Group Access Check
+                try:
+                    await check_access_and_sync(userbot, target_chat_id, status_msg)
+                except Exception as e:
+                    return await status_msg.edit_text(f"❌ **எரர்:** உங்களால் இந்த குரூப்பை அணுக முடியவில்லை!\n`விவரம்: {e}`")
+
+                ACTIVE_TASKS.append(chat_id)
                 success_count = 0
 
                 for msg_id in range(start_msg_id, end_msg_id + 1):
-                    if chat_id not in ACTIVE_TASKS: # STRICT CANCEL CHECK
+                    if chat_id not in ACTIVE_TASKS:
                         break
                     try:
-                        target_msg = await get_message_with_recovery(userbot, target_chat_id, msg_id)
+                        target_msg = await userbot.get_messages(target_chat_id, msg_id)
                         if not target_msg or target_msg.empty:
                             continue
                             
                         if target_msg.media:
                             file_path = await userbot.download_media(target_msg)
-                            if chat_id not in ACTIVE_TASKS: # STRICT CANCEL CHECK BEFORE SENDING
+                            if chat_id not in ACTIVE_TASKS:
                                 if file_path and os.path.exists(file_path): os.remove(file_path)
                                 break
                             if file_path:
@@ -338,7 +344,13 @@ async def handle_inputs(client, message: Message):
                 chat_id_val = parts[0]
                 msg_id = int(parts[2]) if len(parts) == 3 else int(parts[1])
 
-            target_msg = await get_message_with_recovery(userbot, chat_id_val, msg_id)
+            # FIX: Group Access Check
+            try:
+                await check_access_and_sync(userbot, chat_id_val, msg)
+            except Exception as e:
+                return await msg.edit_text(f"❌ **எரர்:** உங்களால் இந்த குரூப்பை அணுக முடியவில்லை!\n`விவரம்: {e}`")
+
+            target_msg = await userbot.get_messages(chat_id_val, msg_id)
 
             if not target_msg or target_msg.empty:
                 return await msg.edit_text("❌ மெசேஜ் கிடைக்கவில்லை!")
