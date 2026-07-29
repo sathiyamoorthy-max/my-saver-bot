@@ -44,6 +44,53 @@ async def set_bot_commands(client):
     ]
     await client.set_bot_commands(commands)
 
+# --- HELPER: Send Media in Original Format ---
+async def send_media_nicely(client, chat_id, target_msg, file_path):
+    caption = target_msg.caption if target_msg.caption else ""
+    if target_msg.audio:
+        await client.send_audio(
+            chat_id,
+            file_path,
+            caption=caption,
+            duration=target_msg.audio.duration,
+            performer=target_msg.audio.performer,
+            title=target_msg.audio.title
+        )
+    elif target_msg.video:
+        await client.send_video(
+            chat_id,
+            file_path,
+            caption=caption,
+            duration=target_msg.video.duration,
+            width=target_msg.video.width,
+            height=target_msg.video.height
+        )
+    elif target_msg.photo:
+        await client.send_photo(
+            chat_id,
+            file_path,
+            caption=caption
+        )
+    elif target_msg.voice:
+        await client.send_voice(
+            chat_id,
+            file_path,
+            caption=caption,
+            duration=target_msg.voice.duration
+        )
+    elif target_msg.animation:
+        await client.send_animation(
+            chat_id,
+            file_path,
+            caption=caption
+        )
+    else:
+        await client.send_document(
+            chat_id,
+            file_path,
+            caption=caption
+        )
+
 @bot.on_message(filters.command("start"))
 async def start(client, message):
     text = (
@@ -109,11 +156,8 @@ async def handle_inputs(client, message: Message):
                 first_parts = first_link.split("/")
                 last_parts = last_link.split("/")
                 
-                # FIX for 3-part links (Topic Groups)
                 start_id = int(first_parts[-1].split("?")[0])
                 end_id = int(last_parts[-1].split("?")[0])
-                
-                # Get the base url by removing the very last message ID part
                 base_url = first_link.rsplit("/", 1)[0]
                 
                 status_msg = await message.reply_text(f"🚀 Batch டவுன்லோட் தொடங்குகிறது ({abs(end_id - start_id) + 1} பைல்கள்)...")
@@ -132,11 +176,7 @@ async def handle_inputs(client, message: Message):
                         target_msg = await userbot.get_messages(chat_id_val, msg_id)
                         if target_msg and target_msg.media:
                             file_path = await userbot.download_media(target_msg)
-                            await client.send_document(
-                                message.chat.id, 
-                                file_path, 
-                                caption=target_msg.caption if target_msg.caption else ""
-                            )
+                            await send_media_nicely(client, message.chat.id, target_msg, file_path)
                             if os.path.exists(file_path):
                                 os.remove(file_path)
                         elif target_msg and target_msg.text:
@@ -160,7 +200,7 @@ async def handle_inputs(client, message: Message):
                 parts = link.split("/c/")
                 sub_parts = parts[1].split("/")
                 chat_id_val = int("-100" + sub_parts[0])
-                msg_id = int(sub_parts[-1].split("?")[0]) # FIX for 3-part links
+                msg_id = int(sub_parts[-1].split("?")[0])
             else:
                 parsed_link = link.split("t.me/")[1].split("/")
                 chat_id_val = parsed_link[0]
@@ -182,11 +222,8 @@ async def handle_inputs(client, message: Message):
                 file_path = await userbot.download_media(target_msg)
                 await msg.edit_text("📤 உங்களுக்கு அனுப்புகிறேன்...")
                 
-                await client.send_document(
-                    message.chat.id, 
-                    file_path, 
-                    caption=target_msg.caption if target_msg.caption else ""
-                )
+                await send_media_nicely(client, message.chat.id, target_msg, file_path)
+                
                 if os.path.exists(file_path):
                     os.remove(file_path)
             elif target_msg.text:
@@ -196,14 +233,13 @@ async def handle_inputs(client, message: Message):
         except Exception as e:
             await msg.edit_text(f"❌ Error: {e}")
 
-# --- # --- 3. MAIN RUNNER ---
+# --- 3. MAIN RUNNER ---
 async def main():
     await bot.start()
     if userbot:
         await userbot.start()
         print("✅ Userbot String Session Connected!")
         
-        # --- NEW FIX: Peer ID Invalid Error-ஐத் தடுக்கும் கோடு ---
         print("🔄 குரூப் டேட்டாவை (Dialogs) சிங்க் செய்கிறது...")
         try:
             async for dialog in userbot.get_dialogs(limit=200):
@@ -211,8 +247,7 @@ async def main():
             print("✅ குரூப் டேட்டா வெற்றிகரமாக சிங்க் செய்யப்பட்டது!")
         except Exception as e:
             print(f"⚠️ Sync Error: {e}")
-        # ---------------------------------------------------------
-        
+            
     await set_bot_commands(bot)
     print("✅ Bot வெற்றிகரமாக இயங்குகிறது!")
     from pyrogram import idle
@@ -220,4 +255,3 @@ async def main():
 
 if __name__ == "__main__":
     loop.run_until_complete(main())
-
