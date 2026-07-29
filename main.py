@@ -1,5 +1,11 @@
 import os
 import asyncio
+
+# --- FIX: Event Loop for Python 3.10+ ---
+loop = asyncio.new_event_loop()
+asyncio.set_event_loop(loop)
+# ----------------------------------------
+
 from pyrogram import Client, filters
 from pyrogram.types import Message, BotCommand
 from flask import Flask
@@ -27,7 +33,7 @@ STRING_SESSION = os.environ.get("STRING_SESSION", "")
 # Bot client
 bot = Client("Bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
-# Userbot client using String Session (No login / No OTP needed!)
+# Userbot client using String Session
 userbot = Client("my_userbot", api_id=API_ID, api_hash=API_HASH, session_string=STRING_SESSION, in_memory=True) if STRING_SESSION else None
 
 BATCH_DATA = {}
@@ -202,5 +208,4 @@ async def main():
     await idle()
 
 if __name__ == "__main__":
-    loop = asyncio.get_event_loop()
     loop.run_until_complete(main())
