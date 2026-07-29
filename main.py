@@ -34,13 +34,14 @@ bot = Client("Bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 userbot = Client("my_userbot", api_id=API_ID, api_hash=API_HASH, session_string=STRING_SESSION, in_memory=True) if STRING_SESSION else None
 
 BATCH_DATA = {}
+ACTIVE_TASKS = [] # குளோன் மற்றும் பேட்ச் வேலைகளைக் கண்காணிக்க
 
 async def set_bot_commands(client):
     commands = [
-        BotCommand("start", "🏠 Home / Start"),
-        BotCommand("batch", "📦 Batch Fetch (Bulk Download)"),
-        BotCommand("cancel", "❌ Cancel Task"),
-        BotCommand("id", "🆔 My User ID")
+        BotCommand("start", "🏠 Home"),
+        BotCommand("batch", "📦 Batch Download"),
+        BotCommand("clone", "♻️ Clone Full Group"),
+        BotCommand("cancel", "❌ Cancel Task")
     ]
     await client.set_bot_commands(commands)
 
@@ -48,106 +49,143 @@ async def set_bot_commands(client):
 async def send_media_nicely(client, chat_id, target_msg, file_path):
     caption = target_msg.caption if target_msg.caption else ""
     if target_msg.audio:
-        await client.send_audio(
-            chat_id,
-            file_path,
-            caption=caption,
-            duration=target_msg.audio.duration,
-            performer=target_msg.audio.performer,
-            title=target_msg.audio.title
-        )
+        await client.send_audio(chat_id, file_path, caption=caption, duration=target_msg.audio.duration, performer=target_msg.audio.performer, title=target_msg.audio.title)
     elif target_msg.video:
-        await client.send_video(
-            chat_id,
-            file_path,
-            caption=caption,
-            duration=target_msg.video.duration,
-            width=target_msg.video.width,
-            height=target_msg.video.height
-        )
+        await client.send_video(chat_id, file_path, caption=caption, duration=target_msg.video.duration, width=target_msg.video.width, height=target_msg.video.height)
     elif target_msg.photo:
-        await client.send_photo(
-            chat_id,
-            file_path,
-            caption=caption
-        )
+        await client.send_photo(chat_id, file_path, caption=caption)
     elif target_msg.voice:
-        await client.send_voice(
-            chat_id,
-            file_path,
-            caption=caption,
-            duration=target_msg.voice.duration
-        )
+        await client.send_voice(chat_id, file_path, caption=caption, duration=target_msg.voice.duration)
     elif target_msg.animation:
-        await client.send_animation(
-            chat_id,
-            file_path,
-            caption=caption
-        )
+        await client.send_animation(chat_id, file_path, caption=caption)
     else:
-        await client.send_document(
-            chat_id,
-            file_path,
-            caption=caption
-        )
+        await client.send_document(chat_id, file_path, caption=caption)
 
 @bot.on_message(filters.command("start"))
 async def start(client, message):
     text = (
-        "🤖 **Restricted Saver Bot (Active)**\n\n"
-        "✨ போட் வெற்றிகரமாக இயக்கத்தில் உள்ளது!\n"
-        "• எந்தவொரு Restricted Channel Link-ஐயும் அனுப்பவும்.\n"
-        "• பல லிங்குகளை டவுன்லோட் செய்ய **/batch** பயன்படுத்தவும்."
+        "🤖 **Restricted Saver Bot (Pro Active)**\n\n"
+        "• Single Link: எந்தவொரு லிங்கையும் அனுப்பவும்.\n"
+        "• Batch: பல பைல்களை எடுக்க `/batch`\n"
+        "• Clone: ஒரு முழு குரூப்பை எடுக்க `/clone <link>`\n"
+        "• Cancel: நடக்கும் வேலையை நிறுத்த `/cancel`"
     )
     await message.reply_text(text)
-
-@bot.on_message(filters.command("id") & filters.private)
-async def get_id(client, message: Message):
-    await message.reply_text(f"🆔 Your User ID: `{message.from_user.id}`")
 
 @bot.on_message(filters.command("cancel") & filters.private)
 async def cancel_task(client, message: Message):
     chat_id = message.chat.id
+    if chat_id in ACTIVE_TASKS:
+        ACTIVE_TASKS.remove(chat_id)
     if chat_id in BATCH_DATA:
         del BATCH_DATA[chat_id]
-    await message.reply_text("❌ நடப்பில் இருந்த பணி ரத்து செய்யப்பட்டது!")
+    await message.reply_text("❌ நடப்பில் இருந்த பணி வெற்றிகரமாக ரத்து செய்யப்பட்டது!")
 
+# ================= CLONE COMMAND =================
+@bot.on_message(filters.command("clone") & filters.private)
+async def clone_chat(client, message: Message):
+    chat_id = message.chat.id
+    if not userbot:
+        await message.reply_text("❌ String Session இணைக்கப்படவில்லை.")
+        return
+        
+    if chat_id in ACTIVE_TASKS:
+        await message.reply_text("⚠️ ஏற்கனவே ஒரு வேலை நடந்து கொண்டிருக்கிறது. முதலில் `/cancel` செய்யவும்.")
+        return
+
+    command_parts = message.text.split(maxsplit=1)
+    if len(command_parts) < 2:
+        await message.reply_text("⚠️ **பயன்பாடு:**\n`/clone <குரூப் லிங்க்>`\n\nஉதாரணம்:\n`/clone https://t.me/c/123456789/10`")
+        return
+
+    link = command_parts[1].strip()
+    msg = await message.reply_text("🔄 குரூப் விவரங்களைச் சரிபார்க்கிறது...")
+    
+    try:
+        # குரூப் ஐடியைப் பிரித்தெடுத்தல்
+        if "/c/" in link:
+            parts = link.split("/c/")
+            sub_parts = parts[1].split("/")
+            target_chat_id = int("-100" + sub_parts[0])
+        else:
+            parsed = link.split("t.me/")[1].split("/")
+            target_chat_id = parsed[0]
+
+        # குரூப்பின் கடைசி மெசேஜ் ஐடியைக் கண்டுபிடித்தல்
+        last_msg_id = 1
+        async for m in userbot.get_chat_history(target_chat_id, limit=1):
+            last_msg_id = m.id
+
+        await msg.edit_text(f"🚀 **Clone தொடங்குகிறது...**\nமொத்த மெசேஜ்கள்: 1 முதல் {last_msg_id} வரை.\n\nநிறுத்த `/cancel` கமாண்டை அனுப்பவும்.")
+        
+        ACTIVE_TASKS.append(chat_id)
+        success_count = 0
+
+        for msg_id in range(1, last_msg_id + 1):
+            if chat_id not in ACTIVE_TASKS:
+                await message.reply_text("❌ Clone பாதியில் ரத்து செய்யப்பட்டது!")
+                break
+                
+            try:
+                target_msg = await userbot.get_messages(target_chat_id, msg_id)
+                if not target_msg or target_msg.empty:
+                    continue
+                    
+                if target_msg.media:
+                    file_path = await userbot.download_media(target_msg)
+                    if file_path:
+                        await send_media_nicely(client, message.chat.id, target_msg, file_path)
+                        os.remove(file_path)
+                        success_count += 1
+                elif target_msg.text:
+                    await client.send_message(message.chat.id, target_msg.text)
+                    success_count += 1
+                
+                # FloodWait வராமல் தடுக்க 2 வினாடி தாமதம்
+                await asyncio.sleep(2)
+                
+            except Exception:
+                continue # டெலீட் ஆன மெசேஜ்களைத் தவிர்த்துவிட்டு அடுத்ததற்குச் செல்லும்
+        
+        if chat_id in ACTIVE_TASKS:
+            await message.reply_text(f"✅ **Clone முழுமையாக முடிந்தது!**\nமொத்தம் {success_count} பைல்கள்/மெசேஜ்கள் பாதுகாக்கப்பட்டன.")
+            ACTIVE_TASKS.remove(chat_id)
+
+    except Exception as e:
+        await msg.edit_text(f"❌ பிழை: {e}")
+        if chat_id in ACTIVE_TASKS:
+            ACTIVE_TASKS.remove(chat_id)
+
+# ================= BATCH COMMAND =================
 @bot.on_message(filters.command("batch") & filters.private)
 async def batch_start(client, message: Message):
     chat_id = message.chat.id
     if not userbot:
-        await message.reply_text("⚠️ Environment-ல் `STRING_SESSION` சரியாக இணைக்கப்படவில்லை!")
-        return
-    
+        return await message.reply_text("⚠️ Session இல்லை!")
+    if chat_id in ACTIVE_TASKS:
+        return await message.reply_text("⚠️ ஏற்கனவே ஒரு வேலை நடக்கிறது. `/cancel` செய்யவும்.")
+        
     BATCH_DATA[chat_id] = {"step": "first_link"}
-    await message.reply_text("📦 **Batch Mode (Bulk Download)**\n\nதயவுசெய்து ஆரம்பக் (First) லிங்கை அனுப்பவும்:")
+    await message.reply_text("📦 **Batch Mode**\nஆரம்பக் (First) லிங்கை அனுப்பவும்:")
 
-@bot.on_message(filters.text & filters.private & ~filters.command(["start", "id", "cancel", "batch"]))
+@bot.on_message(filters.text & filters.private & ~filters.command(["start", "clone", "cancel", "batch"]))
 async def handle_inputs(client, message: Message):
     chat_id = message.chat.id
     text = message.text.strip()
 
     if not userbot:
-        await message.reply_text("❌ செஷன் இணைக்கப்படவில்லை. Render-ல் `STRING_SESSION` உள்ளதா எனச் சரிபார்க்கவும்.")
         return
 
-    # Batch Steps
+    # Batch Steps Processing
     if chat_id in BATCH_DATA:
         b_step = BATCH_DATA[chat_id].get("step")
         if b_step == "first_link":
-            if "t.me/" not in text:
-                await message.reply_text("❌ சரியான முதல் லிங்கை அனுப்பவும்.")
-                return
             BATCH_DATA[chat_id]["first_link"] = text
             BATCH_DATA[chat_id]["step"] = "last_link"
             await message.reply_text("📦 இப்போது இறுதித் (Last) லிங்கை அனுப்பவும்:")
             return
 
         elif b_step == "last_link":
-            if "t.me/" not in text:
-                await message.reply_text("❌ சரியான இறுதி லிங்கை அனுப்பவும்.")
-                return
-            
             first_link = BATCH_DATA[chat_id]["first_link"]
             last_link = text
             del BATCH_DATA[chat_id]
@@ -155,56 +193,53 @@ async def handle_inputs(client, message: Message):
             try:
                 first_parts = first_link.split("/")
                 last_parts = last_link.split("/")
-                
                 start_id = int(first_parts[-1].split("?")[0])
                 end_id = int(last_parts[-1].split("?")[0])
                 base_url = first_link.rsplit("/", 1)[0]
                 
-                status_msg = await message.reply_text(f"🚀 Batch டவுன்லோட் தொடங்குகிறது ({abs(end_id - start_id) + 1} பைல்கள்)...")
+                ACTIVE_TASKS.append(chat_id)
+                status_msg = await message.reply_text(f"🚀 Batch டவுன்லோட் தொடங்குகிறது...")
 
                 for msg_id in range(start_id, end_id + 1):
+                    if chat_id not in ACTIVE_TASKS:
+                        await message.reply_text("❌ Batch ரத்து செய்யப்பட்டது!")
+                        break
                     try:
                         current_link = f"{base_url}/{msg_id}"
                         if "/c/" in current_link:
-                            parts = current_link.split("/c/")
-                            sub_parts = parts[1].split("/")
-                            chat_id_val = int("-100" + sub_parts[0])
+                            chat_id_val = int("-100" + current_link.split("/c/")[1].split("/")[0])
                         else:
-                            parsed = current_link.split("t.me/")[1].split("/")
-                            chat_id_val = parsed[0]
+                            chat_id_val = current_link.split("t.me/")[1].split("/")[0]
 
                         target_msg = await userbot.get_messages(chat_id_val, msg_id)
                         if target_msg and target_msg.media:
                             file_path = await userbot.download_media(target_msg)
                             await send_media_nicely(client, message.chat.id, target_msg, file_path)
-                            if os.path.exists(file_path):
-                                os.remove(file_path)
+                            os.remove(file_path)
                         elif target_msg and target_msg.text:
                             await client.send_message(message.chat.id, target_msg.text)
                         
-                        await asyncio.sleep(1)
+                        await asyncio.sleep(2) # FloodWait Safety
                     except Exception:
                         continue
 
-                await status_msg.edit_text("✅ Batch டவுன்லோட் வெற்றிகரமாக முடிந்தது!")
+                if chat_id in ACTIVE_TASKS:
+                    await status_msg.edit_text("✅ Batch டவுன்லோட் முடிந்தது!")
+                    ACTIVE_TASKS.remove(chat_id)
             except Exception as e:
-                await message.reply_text(f"❌ Batch பிழை: {e}")
+                await message.reply_text(f"❌ பிழை: {e}")
             return
 
     # Single Link Processing
     if "t.me/" in text:
         msg = await message.reply_text("⏳ பைலைத் தேடுகிறது...")
         try:
-            link = text
-            if "/c/" in link:
-                parts = link.split("/c/")
-                sub_parts = parts[1].split("/")
-                chat_id_val = int("-100" + sub_parts[0])
-                msg_id = int(sub_parts[-1].split("?")[0])
+            if "/c/" in text:
+                chat_id_val = int("-100" + text.split("/c/")[1].split("/")[0])
+                msg_id = int(text.split("/")[-1].split("?")[0])
             else:
-                parsed_link = link.split("t.me/")[1].split("/")
-                chat_id_val = parsed_link[0]
-                msg_id = int(parsed_link[-1].split("?")[0])
+                chat_id_val = text.split("t.me/")[1].split("/")[0]
+                msg_id = int(text.split("/")[-1].split("?")[0])
 
             try:
                 target_msg = await userbot.get_messages(chat_id_val, msg_id)
@@ -213,19 +248,15 @@ async def handle_inputs(client, message: Message):
                 target_msg = await userbot.get_messages(chat_obj.id, msg_id)
 
             if not target_msg or target_msg.empty:
-                await msg.edit_text("❌ மெசேஜ் கிடைக்கவில்லை!")
-                return
+                return await msg.edit_text("❌ மெசேஜ் கிடைக்கவில்லை!")
 
             await msg.edit_text("📥 டவுன்லோட் ஆகிறது...")
             
             if target_msg.media:
                 file_path = await userbot.download_media(target_msg)
                 await msg.edit_text("📤 உங்களுக்கு அனுப்புகிறேன்...")
-                
                 await send_media_nicely(client, message.chat.id, target_msg, file_path)
-                
-                if os.path.exists(file_path):
-                    os.remove(file_path)
+                os.remove(file_path)
             elif target_msg.text:
                 await client.send_message(message.chat.id, target_msg.text)
                 
@@ -239,7 +270,6 @@ async def main():
     if userbot:
         await userbot.start()
         print("✅ Userbot String Session Connected!")
-        
         print("🔄 குரூப் டேட்டாவை (Dialogs) சிங்க் செய்கிறது...")
         try:
             async for dialog in userbot.get_dialogs(limit=200):
