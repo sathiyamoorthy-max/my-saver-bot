@@ -30,10 +30,7 @@ API_HASH = os.environ.get("API_HASH", "")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 STRING_SESSION = os.environ.get("STRING_SESSION", "")
 
-# Bot client
 bot = Client("Bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
-
-# Userbot client using String Session
 userbot = Client("my_userbot", api_id=API_ID, api_hash=API_HASH, session_string=STRING_SESSION, in_memory=True) if STRING_SESSION else None
 
 BATCH_DATA = {}
@@ -112,8 +109,11 @@ async def handle_inputs(client, message: Message):
                 first_parts = first_link.split("/")
                 last_parts = last_link.split("/")
                 
+                # FIX for 3-part links (Topic Groups)
                 start_id = int(first_parts[-1].split("?")[0])
                 end_id = int(last_parts[-1].split("?")[0])
+                
+                # Get the base url by removing the very last message ID part
                 base_url = first_link.rsplit("/", 1)[0]
                 
                 status_msg = await message.reply_text(f"🚀 Batch டவுன்லோட் தொடங்குகிறது ({abs(end_id - start_id) + 1} பைல்கள்)...")
@@ -160,11 +160,11 @@ async def handle_inputs(client, message: Message):
                 parts = link.split("/c/")
                 sub_parts = parts[1].split("/")
                 chat_id_val = int("-100" + sub_parts[0])
-                msg_id = int(sub_parts[1].split("?")[0])
+                msg_id = int(sub_parts[-1].split("?")[0]) # FIX for 3-part links
             else:
                 parsed_link = link.split("t.me/")[1].split("/")
                 chat_id_val = parsed_link[0]
-                msg_id = int(parsed_link[1].split("?")[0])
+                msg_id = int(parsed_link[-1].split("?")[0])
 
             try:
                 target_msg = await userbot.get_messages(chat_id_val, msg_id)
