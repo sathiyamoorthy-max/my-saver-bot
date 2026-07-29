@@ -196,12 +196,23 @@ async def handle_inputs(client, message: Message):
         except Exception as e:
             await msg.edit_text(f"❌ Error: {e}")
 
-# --- 3. MAIN RUNNER ---
+# --- # --- 3. MAIN RUNNER ---
 async def main():
     await bot.start()
     if userbot:
         await userbot.start()
         print("✅ Userbot String Session Connected!")
+        
+        # --- NEW FIX: Peer ID Invalid Error-ஐத் தடுக்கும் கோடு ---
+        print("🔄 குரூப் டேட்டாவை (Dialogs) சிங்க் செய்கிறது...")
+        try:
+            async for dialog in userbot.get_dialogs(limit=200):
+                pass
+            print("✅ குரூப் டேட்டா வெற்றிகரமாக சிங்க் செய்யப்பட்டது!")
+        except Exception as e:
+            print(f"⚠️ Sync Error: {e}")
+        # ---------------------------------------------------------
+        
     await set_bot_commands(bot)
     print("✅ Bot வெற்றிகரமாக இயங்குகிறது!")
     from pyrogram import idle
@@ -209,3 +220,4 @@ async def main():
 
 if __name__ == "__main__":
     loop.run_until_complete(main())
+
