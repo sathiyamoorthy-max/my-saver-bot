@@ -40,7 +40,7 @@ async def set_bot_commands(client):
     commands = [
         BotCommand("start", "🏠 Home"),
         BotCommand("batch", "📦 Batch Download"),
-        BotCommand("clone", "♻️ Clone Full Group"),
+        BotCommand("clone", "♻️ Clone from Message"),
         BotCommand("cancel", "❌ Cancel Task")
     ]
     await client.set_bot_commands(commands)
@@ -67,7 +67,7 @@ async def start(client, message):
         "🤖 **Restricted Saver Bot (Pro Active)**\n\n"
         "• Single Link: எந்தவொரு லிங்கையும் அனுப்பவும்.\n"
         "• Batch: பல பைல்களை எடுக்க `/batch`\n"
-        "• Clone: ஒரு முழு குரூப்பை எடுக்க `/clone <link>`\n"
+        "• Clone: நீங்கள் அனுப்பும் லிங்கில் இருந்து குளோன் செய்ய `/clone <link>`\n"
         "• Cancel: நடக்கும் வேலையை நிறுத்த `/cancel`"
     )
     await message.reply_text(text)
@@ -81,47 +81,46 @@ async def cancel_task(client, message: Message):
         del BATCH_DATA[chat_id]
     await message.reply_text("❌ நடப்பில் இருந்த பணி வெற்றிகரமாக ரத்து செய்யப்பட்டது!")
 
-# ================= CLONE COMMAND =================
+# ================= CLONE COMMAND (UPDATED) =================
 @bot.on_message(filters.command("clone") & filters.private)
 async def clone_chat(client, message: Message):
     chat_id = message.chat.id
     if not userbot:
-        await message.reply_text("❌ String Session இணைக்கப்படவில்லை.")
-        return
+        return await message.reply_text("❌ String Session இணைக்கப்படவில்லை.")
         
     if chat_id in ACTIVE_TASKS:
-        await message.reply_text("⚠️ ஏற்கனவே ஒரு வேலை நடந்து கொண்டிருக்கிறது. முதலில் `/cancel` செய்யவும்.")
-        return
+        return await message.reply_text("⚠️ ஏற்கனவே ஒரு வேலை நடந்து கொண்டிருக்கிறது. முதலில் `/cancel` செய்யவும்.")
 
     command_parts = message.text.split(maxsplit=1)
     if len(command_parts) < 2:
-        await message.reply_text("⚠️ **பயன்பாடு:**\n`/clone <குரூப் லிங்க்>`\n\nஉதாரணம்:\n`/clone https://t.me/c/123456789/10`")
-        return
+        return await message.reply_text("⚠️ **பயன்பாடு:**\n`/clone <குரூப் லிங்க்>`\n\nஉதாரணம்:\n`/clone https://t.me/c/123456789/39549`")
 
     link = command_parts[1].strip()
     msg = await message.reply_text("🔄 குரூப் விவரங்களைச் சரிபார்க்கிறது...")
     
     try:
-        # குரூப் ஐடியைப் பிரித்தெடுத்தல்
         if "/c/" in link:
-            parts = link.split("/c/")
-            sub_parts = parts[1].split("/")
-            target_chat_id = int("-100" + sub_parts[0])
+            target_chat_id = int("-100" + link.split("/c/")[1].split("/")[0])
         else:
-            parsed = link.split("t.me/")[1].split("/")
-            target_chat_id = parsed[0]
+            target_chat_id = link.split("t.me/")[1].split("/")[0]
 
-        # குரூப்பின் கடைசி மெசேஜ் ஐடியைக் கண்டுபிடித்தல்
-        last_msg_id = 1
+        # லிங்கில் உள்ள குறிப்பிட்ட மெசேஜ் ஐடியை மட்டும் எடுக்கிறது
+        start_msg_id = int(link.split("/")[-1].split("?")[0])
+
+        last_msg_id = start_msg_id
         async for m in userbot.get_chat_history(target_chat_id, limit=1):
             last_msg_id = m.id
 
-        await msg.edit_text(f"🚀 **Clone தொடங்குகிறது...**\nமொத்த மெசேஜ்கள்: 1 முதல் {last_msg_id} வரை.\n\nநிறுத்த `/cancel` கமாண்டை அனுப்பவும்.")
+        if start_msg_id > last_msg_id:
+            return await msg.edit_text("❌ தவறான லிங்க். இந்த மெசேஜ் குரூப்பில் இல்லை.")
+
+        total_msgs = (last_msg_id - start_msg_id) + 1
+        await msg.edit_text(f"🚀 **Clone தொடங்குகிறது...**\n• ஆரம்பம்: {start_msg_id}\n• முடிவு: {last_msg_id}\n• மொத்தம்: {total_msgs} மெசேஜ்கள்.\n\nநிறுத்த `/cancel` கமாண்டை அனுப்பவும்.")
         
         ACTIVE_TASKS.append(chat_id)
         success_count = 0
 
-        for msg_id in range(1, last_msg_id + 1):
+        for msg_id in range(start_msg_id, last_msg_id + 1):
             if chat_id not in ACTIVE_TASKS:
                 await message.reply_text("❌ Clone பாதியில் ரத்து செய்யப்பட்டது!")
                 break
@@ -149,10 +148,11 @@ async def clone_chat(client, message: Message):
         
         if chat_id in ACTIVE_TASKS:
             await message.reply_text(f"✅ **Clone முழுமையாக முடிந்தது!**\nமொத்தம் {success_count} பைல்கள்/மெசேஜ்கள் பாதுகாக்கப்பட்டன.")
-            ACTIVE_TASKS.remove(chat_id)
-
+            
     except Exception as e:
         await msg.edit_text(f"❌ பிழை: {e}")
+    finally:
+        # ஏதேனும் எரர் வந்தாலும் Task-ஐ க்ளியர் செய்துவிடும்
         if chat_id in ACTIVE_TASKS:
             ACTIVE_TASKS.remove(chat_id)
 
@@ -225,9 +225,11 @@ async def handle_inputs(client, message: Message):
 
                 if chat_id in ACTIVE_TASKS:
                     await status_msg.edit_text("✅ Batch டவுன்லோட் முடிந்தது!")
-                    ACTIVE_TASKS.remove(chat_id)
             except Exception as e:
                 await message.reply_text(f"❌ பிழை: {e}")
+            finally:
+                if chat_id in ACTIVE_TASKS:
+                    ACTIVE_TASKS.remove(chat_id)
             return
 
     # Single Link Processing
