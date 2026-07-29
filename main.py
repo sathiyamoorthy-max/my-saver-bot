@@ -7,7 +7,7 @@ asyncio.set_event_loop(loop)
 # ----------------------------------------
 
 from pyrogram import Client, filters
-from pyrogram.types import Message, BotCommand
+from pyrogram.types import Message, BotCommand, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from pyrogram.errors import FloodWait, PeerIdInvalid
 from flask import Flask
 from threading import Thread
@@ -17,7 +17,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "✅ Advanced Ultimate Bot is Running!"
+    return "✅ Ultimate Pro Max Bot is Running!"
 
 def run_server():
     port = int(os.environ.get("PORT", 8080))
@@ -31,10 +31,7 @@ API_HASH = os.environ.get("API_HASH", "")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 STRING_SESSION = os.environ.get("STRING_SESSION", "")
 
-# --- NEW ADVANCED FEATURES ---
-# Dump Channel ID (உதாரணம்: -100123456789). கொடுக்கவில்லை என்றால் உங்களுக்கு அனுப்பும்.
 DUMP_CHANNEL = os.environ.get("DUMP_CHANNEL", "") 
-# Custom Caption (விளம்பரங்களை நீக்கிவிட்டு நீங்கள் விரும்பும் டெக்ஸ்ட்)
 CUSTOM_CAPTION = os.environ.get("CUSTOM_CAPTION", "") 
 
 bot = Client("Bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
@@ -45,7 +42,7 @@ ACTIVE_TASKS = []
 
 async def set_bot_commands(client):
     commands = [
-        BotCommand("start", "🏠 Home"),
+        BotCommand("start", "🏠 Home / Menu"),
         BotCommand("clone", "♻️ Full Topic Clone"),
         BotCommand("batch", "📦 Batch Download"),
         BotCommand("cancel", "❌ Cancel Task")
@@ -55,8 +52,6 @@ async def set_bot_commands(client):
 # --- HELPER 1: Smart Caption & Media Sender ---
 async def send_media_nicely(client, user_chat_id, target_msg, file_path):
     dest_chat = int(DUMP_CHANNEL) if DUMP_CHANNEL else user_chat_id
-    
-    # கேப்ஷன் மாற்றுதல் (Ad Remover)
     caption = CUSTOM_CAPTION if CUSTOM_CAPTION else (target_msg.caption if target_msg.caption else "")
     
     if target_msg.audio:
@@ -84,18 +79,47 @@ async def get_message_with_recovery(client, chat_id_val, msg_ids):
         chat_obj = await client.get_chat(chat_id_val)
         return await client.get_messages(chat_obj.id, msg_ids)
 
+# ================= START & MENU BUTTONS =================
 @bot.on_message(filters.command("start"))
 async def start(client, message):
     text = (
-        "🤖 **Pro Max Saver Bot**\n\n"
-        "🔥 **Advanced Features Active:**\n"
-        "• Ad-Remover & Custom Caption\n"
-        "• Auto-Forward to Channel\n"
-        "• Smart Anti-Spam\n\n"
-        "லிங்கை அனுப்பி மேஜிக்கைப் பாருங்கள்! ✨"
+        "🤖 **Pro Max Saver Bot (v3.0)**\n\n"
+        "✨ **Welcome!** நான் உங்களுக்காக எந்தவொரு Restricted ஃபைலையும் பாதுகாப்பாக டவுன்லோட் செய்து தருவேன்.\n\n"
+        "கீழே உள்ள பட்டன்களைப் பயன்படுத்தவும் அல்லது நேரடியாக ஒரு லிங்கை அனுப்பவும்!"
     )
-    await message.reply_text(text)
+    buttons = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📦 Batch Download", callback_data="btn_batch"),
+         InlineKeyboardButton("♻️ Clone Group", callback_data="btn_clone")],
+        [InlineKeyboardButton("❌ Cancel Task", callback_data="btn_cancel")]
+    ])
+    await message.reply_text(text, reply_markup=buttons)
 
+@bot.on_callback_query()
+async def cb_handler(client, query: CallbackQuery):
+    data = query.data
+    chat_id = query.message.chat.id
+    
+    if data == "btn_batch":
+        if chat_id in ACTIVE_TASKS:
+            await query.answer("⚠️ ஏற்கனவே ஒரு வேலை நடக்கிறது!", show_alert=True)
+            return
+        BATCH_DATA[chat_id] = {"step": "first_link"}
+        await query.message.reply_text("📦 **Batch Mode**\nதயவுசெய்து **முதல் (First)** மெசேஜ் லிங்கை அனுப்பவும்:")
+        await query.answer()
+        
+    elif data == "btn_clone":
+        await query.message.reply_text("♻️ **Clone Mode**\nகுரூப்பை முழுமையாக எடுக்க இப்படி டைப் செய்யவும்:\n`/clone <லிங்க்>`")
+        await query.answer()
+        
+    elif data == "btn_cancel":
+        if chat_id in ACTIVE_TASKS:
+            ACTIVE_TASKS.remove(chat_id)
+        if chat_id in BATCH_DATA:
+            del BATCH_DATA[chat_id]
+        await query.message.reply_text("❌ பணி உடனடியாக ரத்து செய்யப்பட்டது!")
+        await query.answer("Cancelled!", show_alert=True)
+
+# ================= CANCEL COMMAND =================
 @bot.on_message(filters.command("cancel") & filters.private)
 async def cancel_task(client, message: Message):
     chat_id = message.chat.id
@@ -103,7 +127,19 @@ async def cancel_task(client, message: Message):
         ACTIVE_TASKS.remove(chat_id)
     if chat_id in BATCH_DATA:
         del BATCH_DATA[chat_id]
-    await message.reply_text("❌ நடப்பில் இருந்த பணி நிறுத்தப்பட்டது!")
+    await message.reply_text("❌ நடப்பில் இருந்த பணி உடனடியாக ரத்து செய்யப்பட்டது!")
+
+# ================= BATCH COMMAND =================
+@bot.on_message(filters.command("batch") & filters.private)
+async def batch_start(client, message: Message):
+    chat_id = message.chat.id
+    if not userbot:
+        return await message.reply_text("❌ Session இல்லை.")
+    if chat_id in ACTIVE_TASKS:
+        return await message.reply_text("⚠️ ஏற்கனவே ஒரு வேலை நடக்கிறது. `/cancel` செய்யவும்.")
+        
+    BATCH_DATA[chat_id] = {"step": "first_link"}
+    await message.reply_text("📦 **Batch Mode**\nதயவுசெய்து **முதல் (First)** மெசேஜ் லிங்கை அனுப்பவும்:")
 
 # ================= ADVANCED CLONE =================
 @bot.on_message(filters.command("clone") & filters.private)
@@ -155,8 +191,7 @@ async def clone_chat(client, message: Message):
         if start_msg_id > last_msg_id:
             return await msg.edit_text("❌ லிங்க் தவறானது.")
 
-        dest_name = "உங்கள் சேனலில்" if DUMP_CHANNEL else "இங்கே"
-        await msg.edit_text(f"🚀 **Clone Starts...**\n• பைல்கள் **{dest_name}** அப்லோட் ஆகும்.\n\nநிறுத்த `/cancel`")
+        await msg.edit_text(f"🚀 **Clone Starts...**\n\nநிறுத்த `/cancel`")
         ACTIVE_TASKS.append(chat_id)
         success_count = 0
         chunk_size = 200 
@@ -170,7 +205,7 @@ async def clone_chat(client, message: Message):
                 messages_list = await get_message_with_recovery(userbot, target_chat_id, chunk_ids)
                 
                 for target_msg in messages_list:
-                    if chat_id not in ACTIVE_TASKS:
+                    if chat_id not in ACTIVE_TASKS: # STRICT CANCEL CHECK
                         break
                     if not target_msg or target_msg.empty:
                         continue
@@ -183,18 +218,13 @@ async def clone_chat(client, message: Message):
                     try:
                         if target_msg.media:
                             file_path = await userbot.download_media(target_msg)
+                            if chat_id not in ACTIVE_TASKS: # STRICT CANCEL CHECK BEFORE SENDING
+                                if file_path and os.path.exists(file_path): os.remove(file_path)
+                                break
                             if file_path:
                                 await send_media_nicely(client, message.chat.id, target_msg, file_path)
                                 os.remove(file_path)
                                 success_count += 1
-                                
-                                # Smart Progress Update every 10 files
-                                if success_count % 10 == 0:
-                                    try:
-                                        await msg.edit_text(f"🔄 **Downloading...**\nஇதுவரை {success_count} பைல்கள் அனுப்பப்பட்டுள்ளன.")
-                                    except:
-                                        pass
-                                
                                 await asyncio.sleep(2.5)
                         elif target_msg.text:
                             dest_chat = int(DUMP_CHANNEL) if DUMP_CHANNEL else message.chat.id
@@ -210,20 +240,91 @@ async def clone_chat(client, message: Message):
                 continue
         
         if chat_id in ACTIVE_TASKS:
-            await msg.edit_text(f"✅ **Clone முடிந்தது!**\nமொத்தம் {success_count} பைல்கள் எடுக்கப்பட்டன.")
-    except Exception as e:
-        await msg.edit_text(f"❌ பிழை: {e}")
-    finally:
-        if chat_id in ACTIVE_TASKS:
+            await message.reply_text(f"✅ **Clone முடிந்தது!**\nமொத்தம் {success_count} பைல்கள்.")
             ACTIVE_TASKS.remove(chat_id)
+    except Exception as e:
+        if chat_id in ACTIVE_TASKS: ACTIVE_TASKS.remove(chat_id)
+        await msg.edit_text(f"❌ பிழை: {e}")
 
-# ================= SINGLE LINK PROCESSING =================
+# ================= TEXT & BATCH LINK PROCESSING =================
 @bot.on_message(filters.text & filters.private & ~filters.command(["start", "clone", "cancel", "batch"]))
 async def handle_inputs(client, message: Message):
+    chat_id = message.chat.id
     text = message.text.strip()
     if not userbot:
         return
 
+    # --- BATCH PROCESSING ---
+    if chat_id in BATCH_DATA:
+        b_step = BATCH_DATA[chat_id].get("step")
+        if b_step == "first_link":
+            if "t.me/" not in text:
+                return await message.reply_text("❌ சரியான முதல் லிங்கை அனுப்பவும்.")
+            BATCH_DATA[chat_id]["first_link"] = text
+            BATCH_DATA[chat_id]["step"] = "last_link"
+            return await message.reply_text("📦 இப்போது **இறுதித் (Last)** மெசேஜ் லிங்கை அனுப்பவும்:")
+
+        elif b_step == "last_link":
+            if "t.me/" not in text:
+                return await message.reply_text("❌ சரியான இறுதி லிங்கை அனுப்பவும்.")
+            first_link = BATCH_DATA[chat_id]["first_link"]
+            last_link = text
+            del BATCH_DATA[chat_id]
+
+            try:
+                first_parts = first_link.split("t.me/")[1].split("?")[0].split("/")
+                last_parts = last_link.split("t.me/")[1].split("?")[0].split("/")
+                
+                if first_parts[0] == "c":
+                    target_chat_id = int("-100" + first_parts[1])
+                    start_msg_id = int(first_parts[3]) if len(first_parts) == 4 else int(first_parts[2])
+                    end_msg_id = int(last_parts[3]) if len(last_parts) == 4 else int(last_parts[2])
+                else:
+                    target_chat_id = first_parts[0]
+                    start_msg_id = int(first_parts[2]) if len(first_parts) == 3 else int(first_parts[1])
+                    end_msg_id = int(last_parts[2]) if len(last_parts) == 3 else int(last_parts[1])
+                
+                ACTIVE_TASKS.append(chat_id)
+                status_msg = await message.reply_text(f"🚀 Batch டவுன்லோட் தொடங்குகிறது...")
+                success_count = 0
+
+                for msg_id in range(start_msg_id, end_msg_id + 1):
+                    if chat_id not in ACTIVE_TASKS: # STRICT CANCEL CHECK
+                        break
+                    try:
+                        target_msg = await get_message_with_recovery(userbot, target_chat_id, msg_id)
+                        if not target_msg or target_msg.empty:
+                            continue
+                            
+                        if target_msg.media:
+                            file_path = await userbot.download_media(target_msg)
+                            if chat_id not in ACTIVE_TASKS: # STRICT CANCEL CHECK BEFORE SENDING
+                                if file_path and os.path.exists(file_path): os.remove(file_path)
+                                break
+                            if file_path:
+                                await send_media_nicely(client, chat_id, target_msg, file_path)
+                                os.remove(file_path)
+                                success_count += 1
+                                await asyncio.sleep(2.5)
+                        elif target_msg.text:
+                            dest_chat = int(DUMP_CHANNEL) if DUMP_CHANNEL else chat_id
+                            await client.send_message(dest_chat, target_msg.text)
+                            success_count += 1
+                            await asyncio.sleep(1)
+                    except FloodWait as fw:
+                        await asyncio.sleep(fw.value)
+                    except Exception:
+                        continue
+
+                if chat_id in ACTIVE_TASKS:
+                    await status_msg.edit_text(f"✅ Batch டவுன்லோட் முடிந்தது! ({success_count} பைல்கள்)")
+                    ACTIVE_TASKS.remove(chat_id)
+            except Exception as e:
+                if chat_id in ACTIVE_TASKS: ACTIVE_TASKS.remove(chat_id)
+                await message.reply_text(f"❌ பிழை: {e}")
+            return
+
+    # --- SINGLE LINK PROCESSING ---
     if "t.me/" in text:
         msg = await message.reply_text("⏳ பைலைத் தேடுகிறது...")
         try:
@@ -237,10 +338,7 @@ async def handle_inputs(client, message: Message):
                 chat_id_val = parts[0]
                 msg_id = int(parts[2]) if len(parts) == 3 else int(parts[1])
 
-            try:
-                target_msg = await get_message_with_recovery(userbot, chat_id_val, msg_id)
-            except Exception as e:
-                return await msg.edit_text(f"❌ குரூப்பைக் கண்டுபிடிக்க முடியவில்லை!")
+            target_msg = await get_message_with_recovery(userbot, chat_id_val, msg_id)
 
             if not target_msg or target_msg.empty:
                 return await msg.edit_text("❌ மெசேஜ் கிடைக்கவில்லை!")
@@ -250,10 +348,10 @@ async def handle_inputs(client, message: Message):
             if target_msg.media:
                 file_path = await userbot.download_media(target_msg)
                 await msg.edit_text("📤 அனுப்புகிறேன்...")
-                await send_media_nicely(client, message.chat.id, target_msg, file_path)
-                os.remove(file_path)
+                await send_media_nicely(client, chat_id, target_msg, file_path)
+                if os.path.exists(file_path): os.remove(file_path)
             elif target_msg.text:
-                dest_chat = int(DUMP_CHANNEL) if DUMP_CHANNEL else message.chat.id
+                dest_chat = int(DUMP_CHANNEL) if DUMP_CHANNEL else chat_id
                 await client.send_message(dest_chat, target_msg.text)
                 
             await msg.delete()
