@@ -1,10 +1,10 @@
 import os
 import asyncio
 
-# --- 1. CRITICAL Python 3.14 EVENT LOOP FIX (Must be at the TOP) ---
+# --- 1. CRITICAL PYTHON 3.14 EVENT LOOP FIX (MUST BE AT THE VERY TOP) ---
 loop = asyncio.new_event_loop()
 asyncio.set_event_loop(loop)
-# -------------------------------------------------------------------
+# -----------------------------------------------------------------------
 
 from threading import Thread
 from flask import Flask
@@ -12,12 +12,12 @@ from pyrogram import Client, filters
 from pyrogram.types import Message, BotCommand, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from pyrogram.errors import FloodWait, PeerIdInvalid, RPCError
 
-# --- 2. DUMMY FLASK SERVER (Render Keep-Alive) ---
+# --- 2. DUMMY FLASK SERVER (For Render Keep-Alive) ---
 app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "✅ Ultimate Pro Max Saver Bot is Running Perfectly!"
+    return "✅ Ultimate Pro Max Saver Bot (Peer-Sync Edition) is Running!"
 
 def run_server():
     port = int(os.environ.get("PORT", 8080))
@@ -36,10 +36,28 @@ CUSTOM_CAPTION = os.environ.get("CUSTOM_CAPTION", "")
 bot = Client("Bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 userbot = Client("my_userbot", api_id=API_ID, api_hash=API_HASH, session_string=STRING_SESSION, in_memory=True) if STRING_SESSION else None
 
-# Task Tracker
+# Active Task Control
 ACTIVE_TASKS = {}
+PEER_CACHE_INITIALIZED = False
 
-# --- 4. LINK PARSER (Handles Public, Private, Topic & Thread Links) ---
+# --- 4. PEER CACHE WARMER (Fixes PeerIdInvalid Permanently) ---
+async def initialize_userbot_peer_cache(force=False):
+    global PEER_CACHE_INITIALIZED
+    if PEER_CACHE_INITIALIZED and not force:
+        return
+    if not userbot:
+        return
+    
+    try:
+        print("🔄 Userbot அனைத்து பிரைவேட் சாட்களையும் நினைவகத்தில் ஏற்றுப் பெறுகிறது (Syncing)...")
+        async for dialog in userbot.get_dialogs():
+            pass  # Iterating dialogs automatically populates Pyrogram's memory peer cache!
+        PEER_CACHE_INITIALIZED = True
+        print("✅ Userbot Peer Cache முழுமையாக புதுப்பிக்கப்பட்டது!")
+    except Exception as e:
+        print(f"⚠️ Peer Cache Warning: {e}")
+
+# --- 5. LINK PARSER (Handles Public, Private, Topic & Thread Links) ---
 def parse_telegram_link(url: str):
     url = url.strip().replace("<", "").replace(">", "")
     if "t.me/" not in url:
@@ -67,24 +85,21 @@ def parse_telegram_link(url: str):
             
     return chat_id, topic_id, msg_id
 
-# --- 5. CHAT RESOLVER & AUTO-SYNC ---
-async def resolve_and_get_message(ub_client, chat_id, msg_id, status_msg=None):
+# --- 6. SAFE MESSAGE FETCHER WITH AUTO-RESYNC ---
+async def fetch_message_safely(ub_client, chat_id, msg_id, status_msg=None):
     try:
         return await ub_client.get_messages(chat_id, msg_id)
-    except (PeerIdInvalid, RPCError):
+    except Exception as e:
+        # If PeerIdInvalid or ChannelPrivate occurs, force a full resync of dialogs
         if status_msg:
-            await status_msg.edit_text("🔄 **Syncing...** Userbot பிரைவேட் குரூப்பைச் சரிபார்க்கிறது...")
+            await status_msg.edit_text("🔄 **Peer Syncing...** Userbot பிரைவேட் குரூப்பைக் கண்டறிய சாட்களைச் சரிபார்க்கிறது...")
         
-        try:
-            await ub_client.get_chat(chat_id)
-        except Exception:
-            async for dialog in ub_client.get_dialogs(limit=100):
-                if dialog.chat.id == chat_id:
-                    break
+        await initialize_userbot_peer_cache(force=True)
         
+        # Retry after full resync
         return await ub_client.get_messages(chat_id, msg_id)
 
-# --- 6. ORIGINAL QUALITY MEDIA SENDER ---
+# --- 7. ORIGINAL QUALITY MEDIA SENDER ---
 async def send_media_original(bot_client, target_chat, target_msg, file_path):
     caption = CUSTOM_CAPTION if CUSTOM_CAPTION else (target_msg.caption or "")
     
@@ -111,7 +126,7 @@ async def send_media_original(bot_client, target_chat, target_msg, file_path):
     else:
         await bot_client.send_document(target_chat, file_path, caption=caption)
 
-# --- 7. COMMAND & BUTTON HANDLERS ---
+# --- 8. COMMAND & BUTTON HANDLERS ---
 @bot.on_message(filters.command("start") & filters.private)
 async def start_cmd(client, message: Message):
     keyboard = InlineKeyboardMarkup([
@@ -124,7 +139,7 @@ async def start_cmd(client, message: Message):
         ]
     ])
     text = (
-        "🤖 **Ultimate Pro Max Saver Bot (v7.0 - Final Fixed Edition)**\n\n"
+        "🤖 **Pro Max Saver Bot (v8.0 - Final Peer-Sync Edition)**\n\n"
         "✨ **அம்சங்கள்:**\n"
         "1. **Single Link / Clone:** பிரைவேட்/பப்ளிக் குரூப் லிங்கை நேரடியாக அனுப்பவும் அல்லது `/clone <link>` பயன்படுத்தவும்.\n"
         "2. **Batch Download:** ரேஞ்ச் பைல்களை எடுக்க `/batch <முதல்_லிங்க்> <கடைசி_லிங்க்>` பயன்படுத்தவும்.\n"
@@ -141,7 +156,7 @@ async def callback_handler(client, query: CallbackQuery):
             "📦 **Batch Download பயன்பாடு:**\n"
             "`/batch <முதல்_லிங்க்> <கடைசி_லிங்க்>`\n\n"
             "**உதாரணம்:**\n"
-            "`/batch https://t.me/c/12345/10 https://t.me/c/12345/20`"
+            "`/batch https://t.me/c/3852009116/5 https://t.me/c/3852009116/12`"
         )
     elif query.data == "help_clone":
         await query.message.reply_text(
@@ -164,7 +179,7 @@ async def cancel_cmd(client, message: Message):
     else:
         await message.reply_text("எந்தப் பணியும் தற்போது நடைபெறவில்லை.")
 
-# --- 8. SINGLE LINK / CLONE HANDLER ---
+# --- 9. SINGLE LINK / CLONE HANDLER ---
 @bot.on_message((filters.command("clone") | filters.regex(r"https://t\.me/")) & filters.private)
 async def handle_clone_single(client, message: Message):
     if message.text.startswith("/batch"):
@@ -190,7 +205,7 @@ async def handle_clone_single(client, message: Message):
 
     try:
         chat_id, topic_id, msg_id = parse_telegram_link(url)
-        target_msg = await resolve_and_get_message(userbot, chat_id, msg_id, msg)
+        target_msg = await fetch_message_safely(userbot, chat_id, msg_id, msg)
 
         if not target_msg or target_msg.empty:
             ACTIVE_TASKS[user_id] = False
@@ -219,11 +234,11 @@ async def handle_clone_single(client, message: Message):
             await msg.edit_text("❌ ஆதரவற்ற மீடியா வகை.")
 
     except Exception as e:
-        await msg.edit_text(f"❌ பிழை ஏற்பட்டது: {e}\n\n(Userbot அந்த குரூப்பில் உள்ளதா என உறுதிப்படுத்தவும்!)")
+        await msg.edit_text(f"❌ பிழை ஏற்பட்டது: {e}\n\n⚠️ குறிப்பு: STRING_SESSION கணக்கு இந்த குரூப்பில் உள்ளதா என உறுதிப்படுத்தவும்.")
     finally:
         ACTIVE_TASKS[user_id] = False
 
-# --- 9. BATCH DOWNLOAD HANDLER ---
+# --- 10. BATCH DOWNLOAD HANDLER ---
 @bot.on_message(filters.command("batch") & filters.private)
 async def handle_batch(client, message: Message):
     user_id = message.chat.id
@@ -258,7 +273,8 @@ async def handle_batch(client, message: Message):
     dest_chat = int(DUMP_CHANNEL) if DUMP_CHANNEL else user_id
 
     try:
-        await resolve_and_get_message(userbot, target_chat_id, start_id, msg)
+        # Initial Peer Sync Check
+        await fetch_message_safely(userbot, target_chat_id, start_id, msg)
 
         for i in range(start_id, end_id + 1):
             if not ACTIVE_TASKS.get(user_id):
@@ -300,7 +316,7 @@ async def handle_batch(client, message: Message):
     finally:
         ACTIVE_TASKS[user_id] = False
 
-# --- 10. MAIN ENGINE RUNNER ---
+# --- 11. MAIN ENGINE RUNNER ---
 async def main():
     if not os.path.exists("downloads"):
         os.makedirs("downloads")
@@ -309,6 +325,8 @@ async def main():
     if userbot:
         await userbot.start()
         print("✅ Userbot Connected!")
+        # On Startup: Fetch all dialogs into RAM peer cache!
+        await initialize_userbot_peer_cache(force=True)
 
     await bot.set_bot_commands([
         BotCommand("start", "🏠 Home / Help"),
@@ -316,10 +334,9 @@ async def main():
         BotCommand("cancel", "❌ Cancel Task")
     ])
     
-    print("🚀 Pro Max Saver Bot is Live and Running without Loop Error!")
+    print("🚀 Pro Max Saver Bot (v8.0) is Live with Auto Peer-Sync!")
     from pyrogram import idle
     await idle()
 
 if __name__ == "__main__":
-    # Pre-initialized loop running
     loop.run_until_complete(main())
