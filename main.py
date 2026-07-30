@@ -1,17 +1,23 @@
 import os
 import asyncio
+
+# --- 1. CRITICAL Python 3.14 EVENT LOOP FIX (Must be at the TOP) ---
+loop = asyncio.new_event_loop()
+asyncio.set_event_loop(loop)
+# -------------------------------------------------------------------
+
 from threading import Thread
 from flask import Flask
 from pyrogram import Client, filters
 from pyrogram.types import Message, BotCommand, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from pyrogram.errors import FloodWait, PeerIdInvalid, RPCError
 
-# --- 1. DUMMY FLASK SERVER (Render Keep-Alive) ---
+# --- 2. DUMMY FLASK SERVER (Render Keep-Alive) ---
 app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "✅ Pro Max Saver Bot (The Best Edition) is Running!"
+    return "✅ Ultimate Pro Max Saver Bot is Running Perfectly!"
 
 def run_server():
     port = int(os.environ.get("PORT", 8080))
@@ -19,7 +25,7 @@ def run_server():
 
 Thread(target=run_server, daemon=True).start()
 
-# --- 2. ENVIRONMENT VARIABLES ---
+# --- 3. ENVIRONMENT VARIABLES ---
 API_ID = int(os.environ.get("API_ID", 0))
 API_HASH = os.environ.get("API_HASH", "")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
@@ -30,10 +36,10 @@ CUSTOM_CAPTION = os.environ.get("CUSTOM_CAPTION", "")
 bot = Client("Bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 userbot = Client("my_userbot", api_id=API_ID, api_hash=API_HASH, session_string=STRING_SESSION, in_memory=True) if STRING_SESSION else None
 
-# Active task manager
+# Task Tracker
 ACTIVE_TASKS = {}
 
-# --- 3. LINK PARSER (Handles Public, Private, Topic & Thread Links) ---
+# --- 4. LINK PARSER (Handles Public, Private, Topic & Thread Links) ---
 def parse_telegram_link(url: str):
     url = url.strip().replace("<", "").replace(">", "")
     if "t.me/" not in url:
@@ -61,7 +67,7 @@ def parse_telegram_link(url: str):
             
     return chat_id, topic_id, msg_id
 
-# --- 4. CHAT RESOLVER / AUTO-SYNC (Fixes PeerIdInvalid) ---
+# --- 5. CHAT RESOLVER & AUTO-SYNC ---
 async def resolve_and_get_message(ub_client, chat_id, msg_id, status_msg=None):
     try:
         return await ub_client.get_messages(chat_id, msg_id)
@@ -78,7 +84,7 @@ async def resolve_and_get_message(ub_client, chat_id, msg_id, status_msg=None):
         
         return await ub_client.get_messages(chat_id, msg_id)
 
-# --- 5. ORIGINAL QUALITY MEDIA SENDER ---
+# --- 6. ORIGINAL QUALITY MEDIA SENDER ---
 async def send_media_original(bot_client, target_chat, target_msg, file_path):
     caption = CUSTOM_CAPTION if CUSTOM_CAPTION else (target_msg.caption or "")
     
@@ -105,20 +111,24 @@ async def send_media_original(bot_client, target_chat, target_msg, file_path):
     else:
         await bot_client.send_document(target_chat, file_path, caption=caption)
 
-# --- 6. COMMAND HANDLERS ---
+# --- 7. COMMAND & BUTTON HANDLERS ---
 @bot.on_message(filters.command("start") & filters.private)
 async def start_cmd(client, message: Message):
     keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("📦 Batch Download", callback_data="help_batch"),
-         InlineKeyboardButton("♻️ Clone Help", callback_data="help_clone")],
-        [InlineKeyboardButton("❌ Cancel Task", callback_data="cancel_task")]
+        [
+            InlineKeyboardButton("📦 Batch Download", callback_data="help_batch"),
+            InlineKeyboardButton("♻️ Clone Help", callback_data="help_clone")
+        ],
+        [
+            InlineKeyboardButton("❌ Cancel Task", callback_data="cancel_task")
+        ]
     ])
     text = (
-        "🤖 **Pro Max Saver Bot (The Best Edition)**\n\n"
+        "🤖 **Ultimate Pro Max Saver Bot (v7.0 - Final Fixed Edition)**\n\n"
         "✨ **அம்சங்கள்:**\n"
-        "1. **Single Link / Clone:** டெலிகிராம் பிரைவேட்/பப்ளிக் லிங்கை நேரடியாக அனுப்புங்கள் அல்லது `/clone <link>` பயன்படுத்தவும்.\n"
+        "1. **Single Link / Clone:** பிரைவேட்/பப்ளிக் குரூப் லிங்கை நேரடியாக அனுப்பவும் அல்லது `/clone <link>` பயன்படுத்தவும்.\n"
         "2. **Batch Download:** ரேஞ்ச் பைல்களை எடுக்க `/batch <முதல்_லிங்க்> <கடைசி_லிங்க்>` பயன்படுத்தவும்.\n"
-        "3. **Topic Support:** Topic/Thread லிங்குகளையும் துல்லியமாக எடுக்கும்.\n"
+        "3. **Topic Support:** குரூப் Topic/Thread லிங்குகளையும் துல்லியமாக எடுக்கும்.\n"
         "4. **Original Quality:** 100% தரமான வீடியோ, ஆடியோ, டாக்குமெண்ட் டவுன்லோட்."
     )
     await message.reply_text(text, reply_markup=keyboard)
@@ -128,15 +138,15 @@ async def callback_handler(client, query: CallbackQuery):
     user_id = query.message.chat.id
     if query.data == "help_batch":
         await query.message.reply_text(
-            "📦 **Batch Download கட்டளை:**\n"
+            "📦 **Batch Download பயன்பாடு:**\n"
             "`/batch <முதல்_லிங்க்> <கடைசி_லிங்க்>`\n\n"
             "**உதாரணம்:**\n"
             "`/batch https://t.me/c/12345/10 https://t.me/c/12345/20`"
         )
     elif query.data == "help_clone":
         await query.message.reply_text(
-            "♻️ **Clone கட்டளை:**\n"
-            "`/clone <லிங்க்>` அல்லது வெறுமனே பிரைவேட் குரூப் லிங்கை மெசேஜாக பேஸ்ட் செய்யவும்!"
+            "♻️ **Clone பயன்பாடு:**\n"
+            "`/clone <லிங்க்>` அல்லது பிரைவேட் குரூப் லிங்கை நேரடியாக மெசேஜாக அனுப்புங்கள்!"
         )
     elif query.data == "cancel_task":
         if ACTIVE_TASKS.get(user_id):
@@ -154,7 +164,7 @@ async def cancel_cmd(client, message: Message):
     else:
         await message.reply_text("எந்தப் பணியும் தற்போது நடைபெறவில்லை.")
 
-# --- 7. CLONE / SINGLE LINK HANDLER ---
+# --- 8. SINGLE LINK / CLONE HANDLER ---
 @bot.on_message((filters.command("clone") | filters.regex(r"https://t\.me/")) & filters.private)
 async def handle_clone_single(client, message: Message):
     if message.text.startswith("/batch"):
@@ -213,7 +223,7 @@ async def handle_clone_single(client, message: Message):
     finally:
         ACTIVE_TASKS[user_id] = False
 
-# --- 8. BATCH DOWNLOAD HANDLER ---
+# --- 9. BATCH DOWNLOAD HANDLER ---
 @bot.on_message(filters.command("batch") & filters.private)
 async def handle_batch(client, message: Message):
     user_id = message.chat.id
@@ -290,7 +300,7 @@ async def handle_batch(client, message: Message):
     finally:
         ACTIVE_TASKS[user_id] = False
 
-# --- 9. MAIN ENGINE RUNNER ---
+# --- 10. MAIN ENGINE RUNNER ---
 async def main():
     if not os.path.exists("downloads"):
         os.makedirs("downloads")
@@ -306,10 +316,10 @@ async def main():
         BotCommand("cancel", "❌ Cancel Task")
     ])
     
-    print("🚀 Pro Max Saver Bot (The Best Edition) is Running!")
+    print("🚀 Pro Max Saver Bot is Live and Running without Loop Error!")
     from pyrogram import idle
     await idle()
 
 if __name__ == "__main__":
-    loop = asyncio.get_event_loop()
+    # Pre-initialized loop running
     loop.run_until_complete(main())
