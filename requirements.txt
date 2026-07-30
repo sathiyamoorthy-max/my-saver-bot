@@ -1,4 +1,6 @@
 pyrogram
 tgcrypto
 flask
+google-generativeai
+requests
 yt-dlp
