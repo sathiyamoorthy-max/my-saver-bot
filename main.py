@@ -1,3 +1,4 @@
+# AUTO DEPLOY TEST SUCCESS
 # Auto deploy final test
 # Auto deploy test
 import os
