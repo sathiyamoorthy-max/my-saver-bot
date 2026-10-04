@@ -2,7 +2,7 @@
 # Python 3.10+; existing Pyrogram-compatible environment required.
 # Added: isolated jobs, cancel/pause/resume, history, atomic payment review.
 import os
-BOT_VERSION = "2026.09.25-transfer-fix4"
+BOT_VERSION = "2026.10.04-ratewait-fix5"
 import re
 import asyncio
 import time
@@ -13,6 +13,7 @@ import tempfile
 import shutil
 import functools
 import hashlib
+import math
 from contextvars import ContextVar
 from types import SimpleNamespace
 from contextlib import contextmanager
@@ -82,7 +83,7 @@ ADMIN_MAX_BATCH_MESSAGES = max(0, int(os.environ.get("ADMIN_MAX_BATCH_MESSAGES",
 MAX_BATCH_MESSAGES = max(0, int(os.environ.get("MAX_BATCH_MESSAGES", "0")))
 BATCH_PROGRESS_EVERY = max(1, int(os.environ.get("BATCH_PROGRESS_EVERY", "1")))
 # Do not add an artificial pause between successfully transferred episodes.
-SEND_DELAY = max(0.0, float(os.environ.get("SEND_DELAY", "0")))
+SEND_DELAY = max(0.0, float(os.environ.get("SEND_DELAY", "1.5")))
 # Legacy variable accepted for compatibility; quiet progress now emits no episode receipts.
 KEEP_EPISODE_PROGRESS = os.environ.get("KEEP_EPISODE_PROGRESS", "false").lower() in {
     "1", "true", "yes", "on"
@@ -438,7 +439,7 @@ def ensure_usage_day(user_id: int):
 def batch_limit_for_user(user_id: int):
     """Per-job batch cap. Admin can use 0 as unlimited."""
     if is_admin(user_id):
-        return ADMIN_MAX_BATCH_MESSAGES
+        return 0
     return USER_MAX_BATCH_MESSAGES
 
 
@@ -1274,7 +1275,9 @@ def subscription_text(user_id: int) -> str:
     plan = effective_plan(user_id)
     left = remaining_quota(user_id)
     if sub and sub.get("admin"):
-        expiry = "Admin unlimited"
+        return tr(user_id,
+            "💎 Admin • Lifetime unlimited\nSingle / Batch / Clone: no bot quota or batch cap.\nTelegram rate-limit waits still apply; transfers continue automatically after the wait.",
+            "💎 Admin • Lifetime unlimited\nSingle / Batch / Clone: bot quota / batch cap இல்லை.\nTelegram விதிக்கும் wait பொருந்தும்; wait முடிந்ததும் transfer தானாகத் தொடரும்.")
     elif sub:
         expiry = datetime.fromtimestamp(sub["expires_at"], timezone.utc).strftime("%d-%m-%Y %H:%M UTC")
     else:
@@ -1759,23 +1762,65 @@ async def initialize_peer_cache(ub_client, cache_key, force=False):
     await bounded_operation(sync(), "Syncing accessible Telegram chats")
     PEER_CACHE_INITIALIZED.add(cache_key)
 
+def cooldown_key(account=None):
+    if account is bot:
+        return 'cooldown.bot'
+    if account is server_userbot and account is not None:
+        return 'cooldown.shared'
+    for uid, current in USER_CLIENTS.items():
+        if current is account:
+            return f'cooldown.user.{uid}'
+    uid = JOB_CONTEXT.get()
+    return f'cooldown.user.{uid}' if uid is not None else None
+
+def cooldown_remaining(account=None):
+    key = cooldown_key(account)
+    if not key:
+        return 0
+    try:
+        return max(0, math.ceil(float(setting_get(key, '0')) - time.time()))
+    except (ValueError, TypeError):
+        return 0
+
+def remember_flood(account, seconds):
+    key = cooldown_key(account)
+    seconds = max(1, int(seconds))
+    if key:
+        deadline = max(time.time() + seconds, float(setting_get(key, '0')))
+        setting_set(key, str(deadline))
+    return seconds
+
+async def wait_telegram(account=None, seconds=None):
+    delay = cooldown_remaining(account) if seconds is None else max(seconds, cooldown_remaining(account))
+    if delay <= 0:
+        return
+    meta = JOB_META.get(JOB_CONTEXT.get(), {})
+    meta['wait_until'] = time.monotonic() + delay
+    meta['phase'] = 'Telegram rate-limit wait — continues automatically'
+    try:
+        if meta.get('progress_card'):
+            await _safe_status_edit(meta['progress_card'],
+                f"⏳ Telegram wait: {_format_duration(delay)}\nSent: {meta.get('sent', 0)}\n"
+                "Your job is waiting and will continue automatically.\n"
+                "Admin unlimited removes bot quotas; Telegram waits still apply.\n/status for remaining time • /cancel to stop", force=True)
+        await asyncio.sleep(delay)
+    finally:
+        meta.pop('wait_until', None)
+        meta['phase'] = 'Processing'
+
 async def retry_flood(operation, *args, _metadata_deadline=True, **kwargs):
-    for attempt in range(4):
+    account = getattr(operation, '__self__', None)
+    if hasattr(account, 'chat') and hasattr(account, 'reply_text'):
+        account = bot
+    await wait_telegram(account)
+    while True:
         try:
             if not _metadata_deadline:
                 return await operation(*args, **kwargs)
             return await bounded_operation(operation(*args, **kwargs), "Reading / sending Telegram message")
         except FloodWait as error:
-            if attempt == 3:
-                raise
-            meta = JOB_META.get(JOB_CONTEXT.get(), {})
-            meta['wait_until'] = time.monotonic() + max(1, error.value)
-            meta['phase'] = 'Telegram rate-limit wait'
-            try:
-                await asyncio.sleep(max(1, error.value))
-            finally:
-                meta.pop('wait_until', None)
-                meta['phase'] = 'Processing'
+            remember_flood(account, error.value)
+            await wait_telegram(account, max(1, error.value))
 
 def is_peer_lookup_error(error):
     return (type(error).__name__ == 'PeerIdInvalid' or
@@ -2109,13 +2154,48 @@ def _human_bytes(value):
         value /= 1024
 
 
-async def _safe_status_edit(status_msg, body: str):
-    """Edit progress UI without allowing Telegram message editing to block file I/O."""
+UI_EDIT_TIMEOUT = 3
+UI_EDIT_TASKS = {}
+UI_EDIT_TIMES = {}
+UI_EDIT_BLOCKED_UNTIL = 0.0
+
+async def _safe_status_edit(status_msg, body: str, force=False):
+    """Progress display is optional: slow edits must never cancel file delivery."""
+    global UI_EDIT_BLOCKED_UNTIL
+    key = (getattr(getattr(status_msg, 'chat', None), 'id', None), getattr(status_msg, 'id', id(status_msg)))
+    now = time.monotonic()
+    if now < UI_EDIT_BLOCKED_UNTIL or cooldown_remaining(bot):
+        return
+    if key in UI_EDIT_TASKS or (not force and now - UI_EDIT_TIMES.get(key, -10) < 5):
+        return
+    UI_EDIT_TIMES[key] = now
+    # Bound memory without retaining message objects across completed jobs.
+    if len(UI_EDIT_TIMES) > 1000:
+        for old_key in list(UI_EDIT_TIMES)[:500]:
+            UI_EDIT_TIMES.pop(old_key, None)
+    uid = key[0]
+    async def edit():
+        global UI_EDIT_BLOCKED_UNTIL
+        try:
+            await status_msg.edit_text(body, reply_markup=job_buttons(uid), parse_mode=ParseMode.DISABLED)
+        except FloodWait as error:
+            UI_EDIT_BLOCKED_UNTIL = time.monotonic() + max(1, error.value)
+        except Exception:
+            pass
+    task = asyncio.create_task(edit())
+    UI_EDIT_TASKS[key] = task
+    def done(finished):
+        UI_EDIT_TASKS.pop(key, None)
+        if not finished.cancelled():
+            finished.exception()
+    task.add_done_callback(done)
     try:
-        uid = getattr(getattr(status_msg, 'chat', None), 'id', None)
-        await bounded_operation(status_msg.edit_text(body, reply_markup=job_buttons(uid), parse_mode=ParseMode.DISABLED), "Updating progress", 3)
-    except Exception:
-        pass
+        completed, _ = await asyncio.wait({task}, timeout=UI_EDIT_TIMEOUT)
+        if not completed:
+            task.cancel()
+    except asyncio.CancelledError:
+        task.cancel()
+        raise
 
 
 def _format_duration(seconds):
@@ -2418,6 +2498,8 @@ async def transfer_media_original(ub, bot_client, dest_chat, target_msg, status_
         upload_started = False
         transfer_dir = tempfile.mkdtemp(prefix="savepro-transfer-")
         try:
+            await wait_telegram(ub)
+            await wait_telegram(bot_client)
             download_heartbeat = {
                 "last_progress": time.monotonic(),
                 "current": 0,
@@ -2493,7 +2575,8 @@ async def transfer_media_original(ub, bot_client, dest_chat, target_msg, status_
                 f"⚠️ Transfer watchdog: {e} "
                 f"(attempt {attempt}/{attempts})"
             )
-        except FloodWait:
+        except FloodWait as error:
+            remember_flood(bot_client if upload_started else ub, error.value)
             raise
         except Exception as e:
             last_error = e
@@ -2788,7 +2871,7 @@ async def run_transfer_job(client, message, uid, kind, start_link=None, end_link
     if parent:
         parent = canonical_job(parent,uid)
         if not parent:
-            return await message.reply_text('Job not available for this account.')
+            return await retry_flood(message.reply_text, 'Job not available for this account.')
     meta['parent'] = parent
     with db_conn() as con:
         con.execute('UPDATE jobs SET retry_parent=? WHERE job_id=?',(parent,meta['job_id']))
@@ -2804,15 +2887,17 @@ async def run_transfer_job(client, message, uid, kind, start_link=None, end_link
         con.execute('UPDATE jobs SET required_feature=? WHERE job_id=?',(feature,meta['job_id']))
     allowed, reason = feature_allowed(uid, feature, 1)
     if not allowed:
-        return await message.reply_text(reason, reply_markup=upgrade_markup(uid))
+        return await retry_flood(message.reply_text, reason, reply_markup=upgrade_markup(uid))
     ub = await require_user_client(message)
     if not ub:
         return
     try:
+        await wait_telegram(ub)
+        await wait_telegram(client)
         if parent:
             rows = failed_items(parent, uid)
             if not rows:
-                return await message.reply_text("✅ No confirmed failed items left to retry.")
+                return await retry_flood(message.reply_text, "✅ No confirmed failed items left to retry.")
             source, topic = json.loads(rows[0]['source']), rows[0]['topic']
             ids = [r['message_id'] for r in rows]
         else:
@@ -2845,7 +2930,7 @@ async def run_transfer_job(client, message, uid, kind, start_link=None, end_link
             raise ValueError(f"Server per-job limit: {MAX_BATCH_MESSAGES}.")
         allowed, reason = feature_allowed(uid, feature, total)
         if not allowed:
-            return await message.reply_text(reason, reply_markup=upgrade_markup(uid))
+            return await retry_flood(message.reply_text, reason, reply_markup=upgrade_markup(uid))
         destination = await destination_for(uid)
         if not await request_job_confirmation(message, uid, kind, source, topic, ids, destination):
             return
@@ -2853,14 +2938,19 @@ async def run_transfer_job(client, message, uid, kind, start_link=None, end_link
         set_task_active(uid, True)
         meta['executing'] = True
         meta['prefs_snapshot'] = get_user_customization(uid)
-        overall = await message.reply_text(overall_card(kind,total,0,0,0,0,0), reply_markup=job_buttons(uid))
+        overall = await retry_flood(message.reply_text, overall_card(kind,total,0,0,0,0,0), reply_markup=job_buttons(uid))
+        meta['progress_card'] = overall
         cache_key = f'user:{uid}' if ub is not server_userbot else 'server'
         for index, mid in enumerate(ids, 1):
             await job_checkpoint(uid)
+            await wait_telegram(ub)
+            await wait_telegram(client)
+            if index > 1 and SEND_DELAY:
+                await asyncio.sleep(SEND_DELAY)
             allowed, reason = feature_allowed(uid, feature, 1)
             if not allowed:
                 meta['outcome'] = 'stopped_limit'
-                await message.reply_text(reason)
+                await retry_flood(message.reply_text, reason)
                 break
             # An old retry button must never resend a successfully retried item.
             if parent:
@@ -2942,7 +3032,7 @@ async def run_transfer_job(client, message, uid, kind, start_link=None, end_link
         rows.append([InlineKeyboardButton("🏠 Home",callback_data="home_menu"),InlineKeyboardButton("📦 New Batch",callback_data="batch_new")])
         if uncertain:
             body += '\n⚠️ Check delivery items are excluded from automatic retry to avoid duplicates.'
-        await message.reply_text(body,reply_markup=InlineKeyboardMarkup(rows),parse_mode=ParseMode.DISABLED)
+        await retry_flood(message.reply_text, body,reply_markup=InlineKeyboardMarkup(rows),parse_mode=ParseMode.DISABLED)
         # Remove the temporary card only after final delivery succeeds.
         await safe_delete_message(overall)
     except asyncio.CancelledError:
@@ -2951,7 +3041,7 @@ async def run_transfer_job(client, message, uid, kind, start_link=None, end_link
         raise
     except Exception as exc:
         meta['outcome'] = 'failed'
-        await message.reply_text('❌ ' + friendly_error(exc, uid), reply_markup=support_markup())
+        await retry_flood(message.reply_text, '❌ ' + friendly_error(exc, uid), reply_markup=support_markup())
 
 @managed_job('retry')
 async def run_retry_request(client, message, user_id, parent):
@@ -3059,7 +3149,10 @@ async def handle_new_callback(client, query):
         jid, _, token = jid.partition(':')
         meta = JOB_META.get(uid)
         if not meta or meta['job_id'] != jid:
-            await query.answer('This job is no longer active.',show_alert=True)
+            with db_conn() as con:
+                previous = con.execute('SELECT status,sent,processed FROM jobs WHERE job_id=? AND user_id=?', (jid, uid)).fetchone()
+            detail = (f"Job {previous['status']}: sent {previous['sent']}/{previous['processed']}. See /history." if previous else 'This job is no longer active. See /history or create a new request.')
+            await query.answer(detail,show_alert=True)
             return True
         if action == 'start':
             if token != meta.get('confirm_token'):
@@ -3171,7 +3264,10 @@ async def job_control_cmd(client, message: Message):
     if RECOVERING_OPERATIONS:
         return await message.reply_text("⏳ Network cleanup is still pending. New jobs are blocked to prevent duplicates. If this persists, contact /support for a worker restart; check delivery first.")
     if not meta:
-        return await message.reply_text(tr(uid, "No active job. Start with /batch or send a link.", "வேலை இல்லை. /batch அல்லது link அனுப்பவும்."))
+        with db_conn() as con:
+            previous = con.execute('SELECT status,sent,processed FROM jobs WHERE user_id=? ORDER BY started_at DESC,rowid DESC LIMIT 1', (uid,)).fetchone()
+        detail = f"Last job: {previous['status']} • sent {previous['sent']}/{previous['processed']}. /history" if previous else 'Send a link or use /batch.'
+        return await message.reply_text("No active job. " + detail)
     command = message.command[0].lower()
     if meta.get('confirm_event') and not meta.get('executing') and command == 'status':
         return await message.reply_text('📋 Waiting for Start on the summary card. /cancel to discard.')
