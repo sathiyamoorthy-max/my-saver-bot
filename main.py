@@ -2,7 +2,7 @@
 # Python 3.10+; existing Pyrogram-compatible environment required.
 # Added: isolated jobs, cancel/pause/resume, history, atomic payment review.
 import os
-BOT_VERSION = "2026.10.04-ratewait-fix5"
+BOT_VERSION = "2026.10.04-delivery-fix6"
 import re
 import asyncio
 import time
@@ -82,7 +82,7 @@ ADMIN_MAX_BATCH_MESSAGES = max(0, int(os.environ.get("ADMIN_MAX_BATCH_MESSAGES",
 # Legacy server cap is kept only as an optional hard safety ceiling.
 MAX_BATCH_MESSAGES = max(0, int(os.environ.get("MAX_BATCH_MESSAGES", "0")))
 BATCH_PROGRESS_EVERY = max(1, int(os.environ.get("BATCH_PROGRESS_EVERY", "1")))
-# Do not add an artificial pause between successfully transferred episodes.
+# Pace successful transfers to reduce bursts of Telegram requests.
 SEND_DELAY = max(0.0, float(os.environ.get("SEND_DELAY", "1.5")))
 # Legacy variable accepted for compatibility; quiet progress now emits no episode receipts.
 KEEP_EPISODE_PROGRESS = os.environ.get("KEEP_EPISODE_PROGRESS", "false").lower() in {
@@ -205,6 +205,9 @@ def init_db():
             processed INTEGER NOT NULL DEFAULT 0, sent INTEGER NOT NULL DEFAULT 0,
             failed INTEGER NOT NULL DEFAULT 0, last_message INTEGER)""")
         con.execute("CREATE INDEX IF NOT EXISTS jobs_user_time ON jobs(user_id, started_at)")
+        con.execute("""CREATE TABLE IF NOT EXISTS incoming_requests (
+            user_id INTEGER NOT NULL, message_id INTEGER NOT NULL, job_id TEXT NOT NULL,
+            PRIMARY KEY(user_id, message_id))""")
         con.execute("""CREATE TABLE IF NOT EXISTS job_items (
             job_id TEXT NOT NULL, source TEXT NOT NULL, topic INTEGER,
             message_id INTEGER NOT NULL, status TEXT NOT NULL, error TEXT NOT NULL DEFAULT '',
@@ -2582,7 +2585,10 @@ async def transfer_media_original(ub, bot_client, dest_chat, target_msg, status_
             last_error = e
             if progress_ctx is not None and user_id is not None:
                 progress_ctx['error'] = f'{type(e).__name__}: ' + friendly_error(e,user_id)
-            if upload_started and not isinstance(e,RPCError):
+            # Server errors may arrive after Telegram accepted the file. Never
+            # re-upload automatically when delivery is uncertain (FloodWait is
+            # handled separately above as an explicit rejected request).
+            if upload_started:
                 if progress_ctx is not None:
                     progress_ctx['delivery_uncertain'] = True
                 return False
@@ -2685,13 +2691,20 @@ def managed_job(kind):
             if len(JOB_TASKS) >= MAX_CONCURRENT_JOBS:
                 return await message.reply_text(tr(uid, "Server is busy. Please retry shortly.", "Server busy. சிறிது நேரத்தில் முயற்சிக்கவும்."))
             job_id = secrets.token_hex(6)
+            with db_conn() as con:
+                incoming_id = getattr(message, 'id', None)
+                if kind == 'single' and incoming_id is not None:
+                    claimed = con.execute(
+                        "INSERT OR IGNORE INTO incoming_requests(user_id,message_id,job_id) VALUES(?,?,?)",
+                        (uid, incoming_id, job_id))
+                    if not claimed.rowcount:
+                        return
+                con.execute("INSERT INTO jobs(job_id,user_id,kind,status,started_at) VALUES(?,?,?,?,?)",
+                            (job_id, uid, kind, "running", int(time.time())))
             JOB_META[uid] = {"job_id": job_id, "kind": kind, "processed": 0, "sent": 0, "failed": 0}
             gate = asyncio.Event()
             gate.set()
             JOB_GATES[uid] = gate
-            with db_conn() as con:
-                con.execute("INSERT INTO jobs(job_id,user_id,kind,status,started_at) VALUES(?,?,?,?,?)",
-                            (job_id, uid, kind, "running", int(time.time())))
             async def runner():
                 outcome = "finished"
                 context_token = JOB_CONTEXT.set(uid)
@@ -3424,19 +3437,34 @@ async def start_cmd(client, message: Message):
     if is_admin(user_id):
         keyboard_rows.append([InlineKeyboardButton("🛡 Admin Panel", callback_data="admin_panel")])
 
-    keyboard_rows.insert(1, [InlineKeyboardButton("🆓 Free trial / Status", callback_data="free_trial")])
+    keyboard_rows.insert(1, [InlineKeyboardButton("🆓 Free Access / Balance", callback_data="free_trial")])
+    plan = "💎 Admin Unlimited" if is_admin(user_id) else PLAN_TITLES.get(effective_plan(user_id), "Free")
     text = tr(
         user_id,
-        "🚀 **SavePro**\n\n"
-        "Save Telegram content your connected account is authorized to access.\n\n"
-        "📥 Single • 📦 Batch • ♻️ Clone\n"
-        "🎨 Caption • Watermark • Thumbnail • Audio Branding\n\n"
-        "Choose an action below.",
-        "🚀 **SavePro**\n\n"
-        "உங்கள் connected Telegram account-க்கு authorized access உள்ள content-ஐ save செய்யலாம்.\n\n"
-        "📥 Single • 📦 Batch • ♻️ Clone\n"
-        "🎨 Caption • Watermark • Thumbnail • Audio Branding\n\n"
-        "கீழே ஒரு option தேர்வு செய்யுங்கள்.",
+        "🌟 **Welcome to SavePro**\n\n"
+        f"🏷 Your plan: **{plan}**\n\n"
+        "📥 **One file:** paste a Telegram post link.\n"
+        "📦 **Batch:** choose a start link and count or end link.\n"
+        "♻️ **Clone:** process posts from your chosen starting link.\n\n"
+        "✨ Personalize captions, thumbnails and audio title/artist in Settings.\n\n"
+        "**Get started**\n1. Connect your Telegram account using Login.\n"
+        "2. Send a link your account can access.\n"
+        "3. Receive files and one final results summary.\n\n"
+        "🆓 Free Access shows your daily balance; Plans shows paid features and limits.\n"
+        "⏳ Telegram waits may apply. Keep the job running; it continues automatically.\n"
+        "Need help? Tap Help or Support.",
+        "🌟 **SavePro-க்கு வரவேற்கிறோம்**\n\n"
+        f"🏷 உங்கள் plan: **{plan}**\n\n"
+        "📥 **Single:** ஒரு Telegram post link அனுப்புங்கள்.\n"
+        "📦 **Batch:** start link + count அல்லது end link தேர்வு செய்யுங்கள்.\n"
+        "♻️ **Clone:** தேர்ந்தெடுத்த starting link-லிருந்து posts பெறுங்கள்.\n\n"
+        "✨ Settings-ல் caption, thumbnail, audio title/artist மாற்றலாம்.\n\n"
+        "**தொடங்குவது எப்படி?**\n1. Login மூலம் உங்கள் Telegram account connect செய்யுங்கள்.\n"
+        "2. உங்கள் account access உள்ள link அனுப்புங்கள்.\n"
+        "3. Files மற்றும் கடைசியில் ஒரு results summary கிடைக்கும்.\n\n"
+        "🆓 Free Access-ல் daily balance; Plans-ல் paid features மற்றும் limits பார்க்கலாம்.\n"
+        "⏳ Telegram wait வந்தால் job தானாகத் தொடரும். மீண்டும் start செய்ய வேண்டாம்.\n"
+        "உதவிக்கு Help அல்லது Support தேர்வு செய்யுங்கள்.",
     )
 
     await message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard_rows))
