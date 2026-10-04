@@ -2,7 +2,7 @@
 # Python 3.10+; existing Pyrogram-compatible environment required.
 # Added: isolated jobs, cancel/pause/resume, history, atomic payment review.
 import os
-BOT_VERSION = "2026.10.04-settings-fix7"
+BOT_VERSION = "2026.10.04-session-fix8"
 import re
 import asyncio
 import time
@@ -1574,6 +1574,7 @@ def save_session_string(user_id: int, value: str):
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, path)
+        setting_set(f"session.invalid.{user_id}", "0")
     finally:
         if os.path.exists(temporary):
             os.remove(temporary)
@@ -1722,39 +1723,56 @@ async def build_personal_client(user_id: int):
 
     return None
 
-async def get_user_client(user_id: int):
-    cached = USER_CLIENTS.get(user_id)
-    if cached:
-        try:
-            await bounded_operation(cached.get_me(), "Checking Telegram connection")
-            return cached
-        except Exception:
-            try:
-                await bounded_operation(cached.stop(), "Closing Telegram connection", 10)
-            except Exception:
-                pass
-            USER_CLIENTS.pop(user_id, None)
+def invalid_session_error(error):
+    name = (type(error).__name__ + " " + str(getattr(error, 'ID', ''))).upper().replace('_', '')
+    return any(code in name for code in (
+        'AUTHKEYDUPLICATED', 'AUTHKEYUNREGISTERED', 'SESSIONREVOKED', 'SESSIONEXPIRED'))
 
+async def invalidate_personal_session(uid, account):
+    if account is server_userbot and account is not None:
+        return
+    setting_set(f"session.invalid.{uid}", "1")
+    if USER_CLIENTS.get(uid) is account:
+        USER_CLIENTS.pop(uid, None)
+    if account is not None:
+        try:
+            await bounded_operation(account.stop(), "Closing invalid session", 10)
+        except Exception:
+            pass
+    PEER_CACHE_INITIALIZED.discard(f'user:{uid}')
+
+async def get_user_client(user_id: int):
+    # Serialize checks and replacement so concurrent callers cannot reopen a key.
     async with get_user_lock(user_id):
+        if setting_get(f"session.invalid.{user_id}", "0") == "1":
+            return None
         cached = USER_CLIENTS.get(user_id)
         if cached:
-            return cached
-
+            try:
+                await bounded_operation(cached.get_me(), "Checking Telegram connection")
+                return cached
+            except Exception as error:
+                if invalid_session_error(error):
+                    await invalidate_personal_session(user_id, cached)
+                    return None
+                # A transient error is not a reason to open another copy.
+                raise
         if has_personal_session(user_id):
             try:
                 client = await build_personal_client(user_id)
                 if client:
                     USER_CLIENTS[user_id] = client
                     return client
-            except Exception as e:
-                print(f"⚠️ Personal session load failed for {user_id}: {e}")
-
-        # Backward-compatible shared server session fallback.
+            except Exception as error:
+                if invalid_session_error(error):
+                    await invalidate_personal_session(user_id, None)
+                    return None
+                raise
+            return None
         if server_userbot and getattr(server_userbot, 'is_connected', False) and (
             ALLOW_SHARED_SESSION or is_admin(user_id)
         ):
             return server_userbot
-
         return None
 
 async def close_user_client(user_id: int):
@@ -1871,6 +1889,9 @@ async def require_user_client(message: Message):
     if ub:
         return ub
 
+    if setting_get(f"session.invalid.{user_id}", "0") == "1":
+        await message.reply_text("🔐 Session invalid. Stop other copies using this session, then /login → Phone + OTP. A fresh login is required; reusing the old string will not fix it.")
+        return None
     await message.reply_text(
         "🔐 Telegram login தேவை.\n\n"
         "`/login` அனுப்பி **Phone + OTP** அல்லது **Session String** மூலம் login செய்யுங்கள்.\n"
@@ -2595,6 +2616,8 @@ async def transfer_media_original(ub, bot_client, dest_chat, target_msg, status_
             raise
         except Exception as e:
             last_error = e
+            if invalid_session_error(e):
+                raise
             if progress_ctx is not None and user_id is not None:
                 progress_ctx['error'] = f'{type(e).__name__}: ' + friendly_error(e,user_id)
             # Server errors may arrive after Telegram accepted the file. Never
@@ -2772,6 +2795,10 @@ CLONE_INPUTS = set()
 
 def friendly_error(error, uid):
     name = type(error).__name__.upper()
+    if invalid_session_error(error):
+        return tr(uid,
+            "Telegram session is invalid or was used in more than one place. Stop other copies of this bot/session, then use /login with Phone + OTP for a fresh session. Do not reuse the old session string.",
+            "Telegram session invalid அல்லது வேறு இடத்திலும் பயன்படுத்தப்பட்டுள்ளது. அதே bot/session ஓடும் மற்ற copies-ஐ நிறுத்தி /login → Phone + OTP மூலம் புதிதாக login செய்யுங்கள். பழைய session string மீண்டும் பயன்படுத்த வேண்டாம்.")
     if is_peer_lookup_error(error):
         return tr(uid, "Source could not be resolved. Confirm this connected account can open the post; use /loginstatus.", "Source கண்டறிய முடியவில்லை. இணைத்த account-ல் post திறக்கிறதா பார்க்கவும்; /loginstatus.")
     if isinstance(error, ValueError):
@@ -3022,6 +3049,10 @@ async def run_transfer_job(client, message, uid, kind, start_link=None, end_link
                 error = 'Cancelled. Check delivery before another request.'
                 raise
             except Exception as exc:
+                if invalid_session_error(exc):
+                    error = friendly_error(exc, uid)
+                    await invalidate_personal_session(uid, ub)
+                    raise
                 state = 'uncertain' if ctx.get('upload_started') and not isinstance(exc, RPCError) else 'failed'
                 error = f'{type(exc).__name__}: ' + friendly_error(exc, uid)
             finally:
@@ -3066,6 +3097,8 @@ async def run_transfer_job(client, message, uid, kind, start_link=None, end_link
         raise
     except Exception as exc:
         meta['outcome'] = 'failed'
+        if invalid_session_error(exc):
+            await invalidate_personal_session(uid, ub)
         await retry_flood(message.reply_text, '❌ ' + friendly_error(exc, uid), reply_markup=support_markup())
 
 @managed_job('retry')
@@ -5153,8 +5186,13 @@ async def login_input_handler(client, message: Message):
         )
 
         try:
-            await test_client.start()
-            me = await test_client.get_me()
+            async with get_user_lock(user_id):
+                old_client = USER_CLIENTS.get(user_id)
+                if old_client:
+                    await bounded_operation(old_client.stop(), "Closing previous session", 10)
+                    USER_CLIENTS.pop(user_id, None)
+                await bounded_operation(test_client.start(), "Validating session string")
+                me = await bounded_operation(test_client.get_me(), "Checking session account")
 
             await close_user_client(user_id)
             delete_user_session_files(user_id)
@@ -5178,7 +5216,7 @@ async def login_input_handler(client, message: Message):
             LOGIN_STATES.pop(user_id, None)
             await client.send_message(
                 user_id,
-                f"❌ Session String invalid / login failed: {e}"
+                "❌ " + friendly_error(e, user_id)
             )
 
 # ============================================================
