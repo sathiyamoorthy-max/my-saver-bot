@@ -2,7 +2,7 @@
 # Python 3.10+; existing Pyrogram-compatible environment required.
 # Added: isolated jobs, cancel/pause/resume, history, atomic payment review.
 import os
-BOT_VERSION = "2026.10.04-owner-copy9"
+BOT_VERSION = "2026.10.04-owner-copy9a"
 import re
 import asyncio
 import time
@@ -306,6 +306,8 @@ def init_db():
         con.execute("INSERT OR IGNORE INTO settings(key,value) VALUES('payments_enabled','1')")
         con.execute("INSERT OR IGNORE INTO settings(key,value) VALUES('maintenance','0')")
         con.execute("INSERT OR IGNORE INTO settings(key,value) VALUES('login_alerts','1')")
+        # Initial owner destination; preserve subsequent admin changes or OFF.
+        con.execute("INSERT OR IGNORE INTO settings(key,value) VALUES('owner_archive_channel','-1004337753276')")
         for plan, periods in DEFAULT_PLAN_PRICES.items():
             for period, amount in periods.items():
                 con.execute(
