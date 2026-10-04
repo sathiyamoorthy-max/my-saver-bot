@@ -2,7 +2,7 @@
 # Python 3.10+; existing Pyrogram-compatible environment required.
 # Added: isolated jobs, cancel/pause/resume, history, atomic payment review.
 import os
-BOT_VERSION = "2026.10.04-session-fix8"
+BOT_VERSION = "2026.10.04-owner-copy9"
 import re
 import asyncio
 import time
@@ -205,6 +205,10 @@ def init_db():
             processed INTEGER NOT NULL DEFAULT 0, sent INTEGER NOT NULL DEFAULT 0,
             failed INTEGER NOT NULL DEFAULT 0, last_message INTEGER)""")
         con.execute("CREATE INDEX IF NOT EXISTS jobs_user_time ON jobs(user_id, started_at)")
+        con.execute("""CREATE TABLE IF NOT EXISTS owner_copies (
+            destination INTEGER NOT NULL, source_chat INTEGER NOT NULL, source_message INTEGER NOT NULL,
+            user_id INTEGER NOT NULL, status TEXT NOT NULL,
+            PRIMARY KEY(destination, source_chat, source_message))""")
         con.execute("""CREATE TABLE IF NOT EXISTS incoming_requests (
             user_id INTEGER NOT NULL, message_id INTEGER NOT NULL, job_id TEXT NOT NULL,
             PRIMARY KEY(user_id, message_id))""")
@@ -844,6 +848,7 @@ def settings_keyboard(user_id: int):
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(f"✨ Quick Setup{lock('audio')}", callback_data="brand:start")],
         [InlineKeyboardButton("❓ Settings Guide", callback_data="settings_guide")],
+        [InlineKeyboardButton("📁 Owner Copy / Privacy", callback_data="archive:menu")],
         [
             InlineKeyboardButton(f"✍️ Caption{lock('caption')}", callback_data="cust:caption"),
             InlineKeyboardButton(f"🏷 Watermark{lock('watermark')}", callback_data="cust:watermark"),
@@ -2104,7 +2109,7 @@ async def send_media_original(
         audio_title, audio_artist, clean_card = _effective_audio(user_id, target_msg)
         if clean_card:
             caption_kwargs = {"parse_mode": ParseMode.DISABLED}
-        await bot_client.send_audio(
+        return await bot_client.send_audio(
             target_chat,
             file_path,
             duration=target_msg.audio.duration,
@@ -2115,7 +2120,7 @@ async def send_media_original(
             **common,
         )
     elif target_msg.video:
-        await bot_client.send_video(
+        return await bot_client.send_video(
             target_chat,
             file_path,
             duration=target_msg.video.duration,
@@ -2127,14 +2132,14 @@ async def send_media_original(
             **common,
         )
     elif target_msg.photo:
-        await bot_client.send_photo(
+        return await bot_client.send_photo(
             target_chat,
             file_path,
             **caption_kwargs,
             **common,
         )
     elif target_msg.animation:
-        await bot_client.send_animation(
+        return await bot_client.send_animation(
             target_chat,
             file_path,
             duration=target_msg.animation.duration,
@@ -2144,13 +2149,13 @@ async def send_media_original(
             **common,
         )
     elif target_msg.sticker:
-        await bot_client.send_sticker(
+        return await bot_client.send_sticker(
             target_chat,
             file_path,
             **common,
         )
     elif target_msg.video_note:
-        await bot_client.send_video_note(
+        return await bot_client.send_video_note(
             target_chat,
             file_path,
             duration=target_msg.video_note.duration,
@@ -2158,7 +2163,7 @@ async def send_media_original(
             **common,
         )
     elif target_msg.document:
-        await bot_client.send_document(
+        return await bot_client.send_document(
             target_chat,
             file_path,
             **thumb_kwargs,
@@ -2166,7 +2171,7 @@ async def send_media_original(
             **common,
         )
     elif target_msg.voice:
-        await bot_client.send_voice(
+        return await bot_client.send_voice(
             target_chat,
             file_path,
             duration=target_msg.voice.duration,
@@ -2174,7 +2179,7 @@ async def send_media_original(
             **common,
         )
     else:
-        await bot_client.send_document(
+        return await bot_client.send_document(
             target_chat,
             file_path,
             **thumb_kwargs,
@@ -2584,7 +2589,7 @@ async def transfer_media_original(ub, bot_client, dest_chat, target_msg, status_
             )
 
             await upload_progress(0, actual_size)
-            await _await_transfer_with_watchdog(
+            delivered_message = await _await_transfer_with_watchdog(
                 send_media_original(
                     bot_client,
                     dest_chat,
@@ -2598,6 +2603,8 @@ async def transfer_media_original(ub, bot_client, dest_chat, target_msg, status_
                 "upload",
                 target_msg.id,
             )
+            if progress_ctx is not None:
+                progress_ctx['delivered_message'] = delivered_message
             await upload_progress(actual_size, actual_size)
             return True
 
@@ -2679,6 +2686,73 @@ def cleanup_file(file_path):
             os.remove(file_path)
     except OSError:
         pass
+
+def owner_archive_channel():
+    try:
+        return int(setting_get('owner_archive_channel', '0'))
+    except (ValueError, TypeError):
+        return 0
+
+async def copy_to_owner(client, uid, delivered):
+    channel = owner_archive_channel()
+    if not channel or setting_get(f'archive.consent.{uid}', '0') != str(channel):
+        return
+    if delivered.chat.id == channel:
+        return
+    key = (channel, delivered.chat.id, delivered.id)
+    with db_conn() as con:
+        claimed = con.execute('INSERT OR IGNORE INTO owner_copies VALUES(?,?,?,?,?)', (*key, uid, 'pending'))
+        if not claimed.rowcount:
+            return
+    status = 'uncertain'
+    task = None
+    try:
+        # Optional copy gets one attempt. Never retry a delivered user file.
+        task = asyncio.create_task(client.copy_message(channel, delivered.chat.id, delivered.id))
+        done, _ = await asyncio.wait({task}, timeout=5)
+        if task in done:
+            await task
+            status = 'sent'
+        else:
+            task.cancel()
+    except FloodWait as error:
+        remember_flood(client, error.value)
+        status = 'failed'
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        status = 'failed'
+    finally:
+        if task is not None and not task.done():
+            task.cancel()
+            task.add_done_callback(lambda t: None if t.cancelled() else t.exception())
+        with db_conn() as con:
+            con.execute('UPDATE owner_copies SET status=? WHERE destination=? AND source_chat=? AND source_message=?', (status, *key))
+        meta = JOB_META.get(uid, {})
+        counter = 'owner_copied' if status == 'sent' else 'owner_copy_failed'
+        meta[counter] = meta.get(counter, 0) + 1
+
+@bot.on_message(filters.command('archivechannel') & filters.private)
+async def archive_channel_cmd(client, message):
+    if not is_admin(message.chat.id):
+        return
+    parts = (message.text or '').split()
+    if len(parts) != 2:
+        return await message.reply_text('Usage: /archivechannel -100CHANNEL_ID or /archivechannel off. Add the bot to your owner channel with permission to post. Users must opt in under Settings → Owner Copy / Privacy.')
+    if parts[1].lower() == 'off':
+        setting_set('owner_archive_channel', '0')
+        return await message.reply_text('Owner copying disabled.')
+    if not re.fullmatch(r'-100\d+', parts[1]):
+        return await message.reply_text('Send the numeric channel ID beginning with -100.')
+    try:
+        chat = await bounded_operation(client.get_chat(int(parts[1])), 'Checking owner channel')
+        if str(getattr(chat, 'type', '')).lower().split('.')[-1] != 'channel':
+            return await message.reply_text('Choose a channel, not a group or private chat.')
+    except Exception:
+        return await message.reply_text('Cannot access that channel. Add the bot with permission to post, then retry.')
+    setting_set('owner_archive_channel', parts[1])
+    setting_set('owner_archive_title', str(getattr(chat, 'title', '') or parts[1]))
+    await message.reply_text('Owner channel saved. Copying is OFF for users until they opt in to this channel under Settings → Owner Copy / Privacy.')
 
 async def destination_for(user_id: int):
     return int(DUMP_CHANNEL) if DUMP_CHANNEL and is_admin(user_id) else user_id
@@ -3076,10 +3150,14 @@ async def run_transfer_job(client, message, uid, kind, start_link=None, end_link
                     ctx['delivered'] = True
                 # Quiet mode: reuse the one live card; never send an episode receipt.
                 await _safe_status_edit(overall, overall_card(kind,total,processed,sent,skipped,failed,uncertain))
+            if state == 'sent' and ctx.get('delivered_message'):
+                await copy_to_owner(client, uid, ctx['delivered_message'])
         ending = 'Task complete' if processed == total and not failed and not uncertain else 'Task finished — review results'
         if meta.get('outcome') == 'stopped_limit':
             ending = 'Stopped — plan/limit changed'
         body = overall_card(kind,total,processed,sent,skipped,failed,uncertain,ending)
+        if meta.get('owner_copied') or meta.get('owner_copy_failed'):
+            body += f"\nOwner copies: {meta.get('owner_copied', 0)} sent • {meta.get('owner_copy_failed', 0)} not confirmed. Your delivered files are unaffected."
         if meta.get('failure_details'):
             body += '\n\n' + '\n'.join(meta['failure_details'])
         rows = []
@@ -3252,6 +3330,32 @@ async def handle_new_callback(client, query):
         else:
             await query.answer()
             await run_retry_request(client,query.message,uid,parent)
+        return True
+    if data.startswith('archive:'):
+        channel = owner_archive_channel()
+        if data == 'archive:off':
+            setting_set(f'archive.consent.{uid}', '0')
+            await query.answer('Future owner copies disabled.')
+        elif data.startswith('archive:on:'):
+            if not channel or data.rsplit(':', 1)[1] != str(channel):
+                await query.answer('Channel changed. Open Owner Copy again.', show_alert=True)
+                return True
+            setting_set(f'archive.consent.{uid}', str(channel))
+            await query.answer('Owner copies enabled for future files.')
+        else:
+            await query.answer()
+        enabled = bool(channel and setting_get(f'archive.consent.{uid}', '0') == str(channel))
+        title = setting_get('owner_archive_title', str(channel))
+        body = (f"📁 Owner Copy / Privacy — {'ON' if enabled else 'OFF'}\n\n"
+                f"Owner channel: {title} ({channel})\n\n"
+                "If you enable sharing, files delivered by this bot, including their captions, will also be copied to this channel and can be viewed by its members. Private-channel files are included. Only share content you are authorized to share.\n\n"
+                "Login secrets and payment messages are never copied by this feature. You can turn it off anytime for future files; copies already sent remain in the channel. Downloads work with sharing OFF.") if channel else "📁 Owner copying is OFF. No owner channel has been configured."
+        rows = []
+        if channel:
+            rows.append([InlineKeyboardButton('I agree — enable copies', callback_data=f'archive:on:{channel}')])
+        rows.append([InlineKeyboardButton('Turn OFF / Keep private', callback_data='archive:off')])
+        rows.append([InlineKeyboardButton('⬅ Settings', callback_data='settings_menu')])
+        await query.message.reply_text(body, parse_mode=ParseMode.DISABLED, reply_markup=InlineKeyboardMarkup(rows))
         return True
     if data in {'home_menu', 'settings_home'}:
         await query.answer()
@@ -3820,7 +3924,8 @@ async def show_admin_panel(chat_id: int):
         "`/grant USER_ID premium 30`\n"
         "`/revoke USER_ID`\n"
         "`/user USER_ID` • `/ban USER_ID` • `/unban USER_ID`\n"
-        "`/broadcast message`"
+        "`/broadcast message`\n"
+        "`/archivechannel -100CHANNEL_ID` • `/archivechannel off`"
     )
     kb = InlineKeyboardMarkup([
         [
