@@ -4,3 +4,5 @@ flask
 google-generativeai
 requests
 yt-dlp
+Pillow
+qrcode
