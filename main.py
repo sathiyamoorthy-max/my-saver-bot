@@ -2,7 +2,7 @@
 # Python 3.10+; existing Pyrogram-compatible environment required.
 # Added: isolated jobs, cancel/pause/resume, history, atomic payment review.
 import os
-BOT_VERSION = "2026.10.04-delivery-fix6"
+BOT_VERSION = "2026.10.04-settings-fix7"
 import re
 import asyncio
 import time
@@ -827,7 +827,13 @@ def customization_summary(user_id: int):
         f"🖼 Thumbnail: **{'CUSTOM' if thumb_on else 'DEFAULT'}**\n"
         f"🎧 Audio: **{'CUSTOM' if audio_custom else 'ORIGINAL'}**\n"
         f"🧩 Advanced text: **{'ON' if advanced_text else 'OFF'}**\n\n"
-        "✨ Use **Quick Setup** for the fastest clean branding setup."
+        + tr(user_id,
+            "✨ Quick Setup guides you through audio branding.\n"
+            "Changes apply to new sends. 🔒 marks features outside your plan.\n"
+            "Use Preview before downloading; Settings Guide explains every option.",
+            "✨ Quick Setup மூலம் audio branding அமைக்கலாம்.\n"
+            "புதிய sends-க்கு மாற்றங்கள் பொருந்தும். 🔒 = உங்கள் plan-ல் இல்லை.\n"
+            "Download முன் Preview பாருங்கள்; Settings Guide-ல் விளக்கம் உள்ளது.")
     )
 
 
@@ -836,7 +842,8 @@ def settings_keyboard(user_id: int):
         return "" if customization_allowed(user_id, feature) else " 🔒"
 
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("✨ Quick Setup", callback_data="brand:start")],
+        [InlineKeyboardButton(f"✨ Quick Setup{lock('audio')}", callback_data="brand:start")],
+        [InlineKeyboardButton("❓ Settings Guide", callback_data="settings_guide")],
         [
             InlineKeyboardButton(f"✍️ Caption{lock('caption')}", callback_data="cust:caption"),
             InlineKeyboardButton(f"🏷 Watermark{lock('watermark')}", callback_data="cust:watermark"),
@@ -848,24 +855,29 @@ def settings_keyboard(user_id: int):
         [InlineKeyboardButton(f"🧩 Advanced Text{lock('text')}", callback_data="cust:text")],
         [
             InlineKeyboardButton("👁 Preview", callback_data="cust:preview"),
-            InlineKeyboardButton("🔄 Reset", callback_data="cust:reset"),
+            InlineKeyboardButton("↩ Reset Branding", callback_data="cust:reset"),
         ],
+        [InlineKeyboardButton("🔐 Account / Login", callback_data="login_menu"),
+         InlineKeyboardButton("🌐 Language", callback_data="language_menu")],
         [
             InlineKeyboardButton("🛒 Plans", callback_data="plans_menu"),
-            InlineKeyboardButton("🏠 Home", callback_data="settings_home"),
+            InlineKeyboardButton("🏠 Home", callback_data="home_menu"),
         ],
     ])
 
 
-def caption_settings_keyboard():
+def caption_settings_keyboard(user_id=None):
+    mode = get_user_customization(user_id).get('caption_mode', 'original') if user_id is not None else 'original'
+    def label(key, text):
+        return ('✅ ' if mode == key else '') + text
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("📝 Original", callback_data="cust:caption_mode:original"),
-            InlineKeyboardButton("♻️ Replace", callback_data="cust:caption_mode:replace"),
+            InlineKeyboardButton(label("original", "Keep Original"), callback_data="cust:caption_mode:original"),
+            InlineKeyboardButton(label("replace", "Replace"), callback_data="cust:caption_mode:replace"),
         ],
         [
-            InlineKeyboardButton("➕ Append", callback_data="cust:caption_mode:append"),
-            InlineKeyboardButton("🚫 No Caption", callback_data="cust:caption_mode:remove"),
+            InlineKeyboardButton(label("append", "Add Below"), callback_data="cust:caption_mode:append"),
+            InlineKeyboardButton(label("remove", "No Caption"), callback_data="cust:caption_mode:remove"),
         ],
         [
             InlineKeyboardButton("✏️ Set / Change Caption", callback_data="cust:caption_set"),
@@ -3208,7 +3220,7 @@ async def handle_new_callback(client, query):
             await query.answer()
             await run_retry_request(client,query.message,uid,parent)
         return True
-    if data == 'home_menu':
+    if data in {'home_menu', 'settings_home'}:
         await query.answer()
         await start_cmd(client,query.message)
         return True
@@ -3386,6 +3398,7 @@ def login_keyboard():
             InlineKeyboardButton("✅ Login Status", callback_data="login_status"),
             InlineKeyboardButton("🚪 Logout", callback_data="login_logout"),
         ],
+        [InlineKeyboardButton("🏠 Home", callback_data="home_menu")],
     ])
 
 @bot.on_message(filters.command("start") & filters.private)
@@ -3818,6 +3831,7 @@ async def callback_handler(client, query: CallbackQuery):
         return
 
     if query.data == "language_menu":
+        await query.answer()
         await query.message.reply_text(
             "🌐 Choose language / மொழியைத் தேர்வு செய்யுங்கள்:",
             reply_markup=InlineKeyboardMarkup([[
@@ -3834,16 +3848,31 @@ async def callback_handler(client, query: CallbackQuery):
         set_language(user_id, lang)
         await query.answer("Language updated ✅", show_alert=False)
         await query.message.reply_text(
-            "✅ Language: English" if lang == "en" else "✅ மொழி: தமிழ்"
+            "✅ Language: English" if lang == "en" else "✅ மொழி: தமிழ்",
+            reply_markup=settings_keyboard(user_id),
         )
         return
 
-    if query.data == "settings_home":
+    if query.data == "settings_guide":
         await query.answer()
-        await query.message.reply_text(
-            "🏠 Use /start for the full home menu.",
-            reply_markup=upgrade_markup(user_id),
-        )
+        await query.message.reply_text(tr(user_id,
+            "⚙️ SETTINGS GUIDE\n\n"
+            "✍️ Caption: keep the original, replace it, add your text below it, or remove it.\n"
+            "🏷 Text watermark: adds your brand to captions/text; it is not embedded into video or photos.\n"
+            "🖼 Thumbnail: your cover image for supported audio/video/document uploads.\n"
+            "🎧 Audio: change the displayed title and artist. Clean card hides audio captions and source buttons, including caption watermarks.\n"
+            "🧩 Advanced Text: add text before/after text posts and choose whether to keep their original text.\n\n"
+            "👁 Preview shows a sample. Changes apply only to future sends.\n"
+            "🔒 Locked options need a higher plan. Reset Branding asks before clearing your saved branding.",
+            "⚙️ SETTINGS வழிகாட்டி\n\n"
+            "✍️ Caption: பழையதை வைத்தல், மாற்றுதல், கீழே உங்கள் text சேர்த்தல் அல்லது நீக்குதல்.\n"
+            "🏷 Text watermark: caption/text-ல் brand சேர்க்கும்; video/photo உள்ளே பதிக்காது.\n"
+            "🖼 Thumbnail: ஆதரிக்கப்படும் audio/video/document-க்கு cover image.\n"
+            "🎧 Audio: title, artist மாற்றலாம். Clean card ON என்றால் audio caption, caption watermark, source buttons மறையும்.\n"
+            "🧩 Advanced Text: text post முன்/பின் உங்கள் text சேர்க்கலாம்.\n\n"
+            "👁 Preview-ல் மாதிரி பாருங்கள். புதிய sends-க்கு மட்டும் மாற்றம் பொருந்தும்.\n"
+            "🔒 = higher plan தேவை. Reset Branding உறுதிப்படுத்திய பிறகே settings நீங்கும்."),
+            reply_markup=settings_keyboard(user_id), parse_mode=ParseMode.DISABLED)
         return
 
     if query.data == "settings_menu":
@@ -3905,13 +3934,25 @@ async def callback_handler(client, query: CallbackQuery):
         return
 
     if query.data == "cust:reset":
+        token = secrets.token_hex(6)
+        CUSTOMIZE_STATES[user_id] = {"step": "reset_confirm", "token": token}
+        await query.answer()
+        await query.message.reply_text(tr(user_id,
+            "↩ Reset all branding?\nCaption, watermark, thumbnail, audio and advanced text will return to defaults. Your login and plan stay unchanged.",
+            "↩ Branding அனைத்தையும் reset செய்யவா?\nCaption, watermark, thumbnail, audio, advanced text default ஆகும். Login மற்றும் plan மாறாது."),
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("Yes, reset branding", callback_data=f"cust:reset_confirm:{token}")],
+                [InlineKeyboardButton("Keep my settings", callback_data="settings_menu")]]))
+        return
+
+    if query.data.startswith("cust:reset_confirm:"):
+        pending = CUSTOMIZE_STATES.get(user_id, {})
+        if pending.get('step') != 'reset_confirm' or pending.get('token') != query.data.rsplit(':', 1)[1]:
+            return await query.answer("This reset request expired. Open Settings again.", show_alert=True)
         CUSTOMIZE_STATES.pop(user_id, None)
         reset_user_customization(user_id)
-        await query.answer("Settings reset ✅", show_alert=False)
-        await query.message.reply_text(
-            "✅ Caption, watermark, thumbnail and text settings reset to default.",
-            reply_markup=settings_keyboard(user_id),
-        )
+        await query.answer("Branding reset ✅")
+        await query.message.reply_text(customization_summary(user_id), reply_markup=settings_keyboard(user_id))
         return
 
     if query.data == "cust:caption":
@@ -3935,7 +3976,7 @@ async def callback_handler(client, query: CallbackQuery):
             "• Append = original + your caption\n"
             "• No Caption = remove caption\n\n"
             "Send plain text or @YourChannel — no braces needed. Optional placeholders: `{filename}` `{id}` `{date}` `{original}`",
-            reply_markup=caption_settings_keyboard(),
+            reply_markup=caption_settings_keyboard(user_id),
         )
         return
 
@@ -4451,6 +4492,7 @@ async def callback_handler(client, query: CallbackQuery):
         return
 
     if query.data == "login_menu":
+        await query.answer()
         await query.message.reply_text(
             "🔐 **Telegram Login**\nஒரு method தேர்வு செய்யுங்கள்:",
             reply_markup=login_keyboard(),
@@ -4638,6 +4680,11 @@ async def customization_text_input_handler(client, message: Message):
         return
 
     step = state.get("step")
+    if step == "reset_confirm":
+        return await message.reply_text(
+            "Reset is waiting for confirmation. Use the Yes button above, or Keep my settings below.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Keep my settings", callback_data="settings_menu")]]),
+        )
     if step == "thumbnail":
         return await message.reply_text("🖼 Send a photo/image for the thumbnail, or /cancel.")
 
