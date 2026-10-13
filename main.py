@@ -2,7 +2,7 @@
 # Python 3.10+; existing Pyrogram-compatible environment required.
 # Added: isolated jobs, cancel/pause/resume, history, atomic payment review.
 import os
-BOT_VERSION = "2026.10.13-admin-batch10"
+BOT_VERSION = "2026.10.13-plan-buttons11"
 import re
 import asyncio
 import time
@@ -3869,9 +3869,15 @@ async def show_user_profile(message, target):
           f"Delivered: {totals[0]} • Failed/check delivery: {totals[1]}\n\nRecent payments:\n"+
           ('\n'.join(f"₹{r['amount']} • {r['plan']} • {r['status']}" for r in payments) or 'None')+
           '\n\nRecent admin changes:\n'+ ('\n'.join(f"{r['action']} • admin {r['actor']} • {stamp(r['created_at'])}" for r in audit) or 'None recorded'))
-    rows=[[InlineKeyboardButton('🎁 Activate / Replace Plan',callback_data=f'au:plans:{target}')]]
+    rows=[
+        [InlineKeyboardButton('👤 Refresh User Details', callback_data=f'au:profile:{target}')],
+        [InlineKeyboardButton('⚡ Activate Basic', callback_data=f'au:days:{target}:replace:basic'),
+         InlineKeyboardButton('🥈 Activate Standard', callback_data=f'au:days:{target}:replace:standard')],
+        [InlineKeyboardButton('🥇 Activate Premium', callback_data=f'au:days:{target}:replace:premium'),
+         InlineKeyboardButton('💎 Activate Ultimate', callback_data=f'au:days:{target}:replace:ultimate')],
+    ]
     if sub and sub['expires_at']>now:rows.append([InlineKeyboardButton('➕ Add Days',callback_data=f"au:days:{target}:extend:{sub['plan']}")])
-    rows += [[InlineKeyboardButton('Revoke Plan',callback_data=f'au:prepare:{target}:revoke:-:0'),InlineKeyboardButton('Unban' if u['banned'] else 'Ban',callback_data=f"au:prepare:{target}:{'unban' if u['banned'] else 'ban'}:-:0")], [InlineKeyboardButton('👥 Users',callback_data='au:list:all:0')]]
+    rows += [[InlineKeyboardButton('🆓 Set Free / Revoke',callback_data=f'au:prepare:{target}:revoke:-:0'),InlineKeyboardButton('Unban' if u['banned'] else 'Ban',callback_data=f"au:prepare:{target}:{'unban' if u['banned'] else 'ban'}:-:0")], [InlineKeyboardButton('👥 Users',callback_data='au:list:all:0')]]
     await message.reply_text(text,parse_mode=ParseMode.DISABLED,reply_markup=InlineKeyboardMarkup(rows))
 
 async def admin_users_callback(client,query):
@@ -3906,7 +3912,7 @@ async def admin_users_callback(client,query):
             return await query.message.reply_text(f'Confirm {mode} for Telegram user {target}?\nPlan: {plan} • Days: {days}\nReplace starts from today. Add Days extends the active matching plan. No payment is required for an admin grant.',reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('Confirm',callback_data=f'au:confirm:{token}')],[InlineKeyboardButton('Cancel / Back',callback_data=f'au:profile:{target}')]]))
         else:raise ValueError('Unknown action.')
         rows.append([InlineKeyboardButton('⬅ User Profile',callback_data=f'au:profile:{target}')])
-        await query.message.reply_text(f'User {target} • Choose an option:',reply_markup=InlineKeyboardMarkup(rows))
+        await query.message.reply_text(f'User {target} • '+(f'{plan.title()} • Choose duration (7 / 30 / 365 days). No change until Confirm.' if action=='days' else 'Choose a plan.'),reply_markup=InlineKeyboardMarkup(rows))
     except (ValueError,IndexError) as error:
         await query.message.reply_text(str(error))
 
@@ -3927,7 +3933,7 @@ async def grant_cmd(client, message: Message):
         return
     parts = message.text.split()
     if len(parts) != 4:
-        return await message.reply_text("Usage: `/grant USER_ID premium 30`")
+        return await message.reply_text("Usage: /grant USER_ID PLAN DAYS\nPlans: basic, standard, premium, ultimate\nExample: /grant USER_ID basic 30\nOr open /admin → All Users / User Details for buttons.")
     _, uid, plan, days = parts
     if not uid.isdigit() or plan not in DEFAULT_PLAN_PRICES or not days.isdigit():
         return await message.reply_text("❌ Invalid USER_ID / plan / days.")
@@ -4027,17 +4033,19 @@ async def show_admin_panel(chat_id: int):
         "Commands:\n"
         "`/setprice basic monthly 49`\n"
         "`/setlimit standard 50`\n"
-        "`/grant USER_ID premium 30`\n"
+        "Manual activation: choose Users / User Details → user → plan → days → Confirm.\n"
+        "All plans: basic / standard / premium / ultimate.\n"
+        "Command alternative: `/grant USER_ID PLAN DAYS`\n"
         "`/revoke USER_ID`\n"
         "`/user USER_ID` • `/ban USER_ID` • `/unban USER_ID`\n"
         "`/broadcast message`\n"
         "`/archivechannel -100CHANNEL_ID` • `/archivechannel off`"
     )
     kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("👥 Users / Manage Plans", callback_data="au:list:all:0")],
+        [InlineKeyboardButton("👥 All Users / User Details", callback_data="au:list:all:0")],
         [
             InlineKeyboardButton("🧾 Pending", callback_data="admin_pending"),
-            InlineKeyboardButton("💵 Plans", callback_data="admin_plans"),
+            InlineKeyboardButton("💵 Plan Prices", callback_data="admin_plans"),
         ],
         [
             InlineKeyboardButton("💰 Toggle Payments", callback_data="admin_toggle_payments"),
