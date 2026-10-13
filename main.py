@@ -2,7 +2,7 @@
 # Python 3.10+; existing Pyrogram-compatible environment required.
 # Added: isolated jobs, cancel/pause/resume, history, atomic payment review.
 import os
-BOT_VERSION = "2026.10.04-owner-copy9a"
+BOT_VERSION = "2026.10.13-admin-batch10"
 import re
 import asyncio
 import time
@@ -199,6 +199,7 @@ def db_conn():
 def init_db():
     with db_conn() as con:
         con.execute("PRAGMA journal_mode=WAL")
+        con.execute("CREATE TABLE IF NOT EXISTS admin_audit(id INTEGER PRIMARY KEY AUTOINCREMENT,actor INTEGER NOT NULL,target INTEGER NOT NULL,action TEXT NOT NULL,detail TEXT NOT NULL,created_at INTEGER NOT NULL)")
         con.execute("""CREATE TABLE IF NOT EXISTS jobs (
             job_id TEXT PRIMARY KEY, user_id INTEGER NOT NULL, kind TEXT NOT NULL,
             status TEXT NOT NULL, started_at INTEGER NOT NULL, finished_at INTEGER,
@@ -2964,11 +2965,11 @@ async def request_job_confirmation(message, uid, kind, source, topic, ids, desti
         task_name = "Full Clone" if kind == "clone" else kind.title()
         body = (
             f"📋 {task_name} • Ready\n"
-            f"Items: {len(ids)} • {ids[0]} → {ids[-1]}\n"
+            f"Messages to check: {len(ids)} • IDs {ids[0]} → {ids[-1]}\n"
             f"Delivery: {'Private chat' if destination == uid else 'Configured destination'}\n"
             f"Branding: {'Custom' if custom_branding else 'Original'}\n"
             + ("Topic selected\n" if topic else "")
-            + "\nMissing/deleted posts will be skipped automatically."
+            + "\nMissing/deleted posts will be skipped automatically. Message count may differ from files delivered.\nUse Pause / Resume / Cancel while running. Telegram waits continue automatically; one results summary appears at the end."
         )
         jid = meta['job_id']
         await message.reply_text(
@@ -3281,6 +3282,9 @@ async def launch_clone_link(client,message,user_id,link):
     await run_transfer_job(client,message,user_id,'clone',start_link=link)
 
 async def handle_new_callback(client, query):
+    if (query.data or '').startswith('au:'):
+        await admin_users_callback(client, query)
+        return True
     uid, data = query.from_user.id, query.data or ''
     if data.startswith('job:'):
         _, action, jid = data.split(':',2)
@@ -3792,6 +3796,131 @@ async def setlimit_cmd(client, message: Message):
     setting_set(f"limit.{plan}", int(limit))
     await message.reply_text(f"✅ {plan} daily limit = {limit}")
 
+ADMIN_CONFIRMATIONS = {}
+
+def admin_change(actor, target, action, plan='', days=0):
+    if not is_admin(actor):
+        raise ValueError('Admin access required.')
+    if action not in {'replace', 'extend', 'revoke', 'ban', 'unban'}:
+        raise ValueError('Unknown action.')
+    if action in {'replace', 'extend'} and (plan not in DEFAULT_PLAN_PRICES or not 1 <= days <= 3650):
+        raise ValueError('Choose a valid plan and 1–3650 days.')
+    now = int(time.time())
+    with db_conn() as con:
+        con.execute('BEGIN IMMEDIATE')
+        if not con.execute('SELECT 1 FROM users WHERE user_id=?', (target,)).fetchone():
+            raise ValueError('User not registered. Ask them to send /start, then use their Telegram User ID, not phone number.')
+        before = con.execute('SELECT * FROM subscriptions WHERE user_id=?', (target,)).fetchone()
+        if action in {'ban','revoke'} and is_admin(target):
+            raise ValueError('Cannot ban or revoke an admin account here.')
+        if action == 'extend':
+            if not before or before['expires_at'] <= now or before['plan'] != plan:
+                raise ValueError('Extension needs an active matching plan. Use Replace Plan instead.')
+            expiry = before['expires_at'] + days * 86400
+        else:
+            expiry = now + days * 86400
+        if action in {'replace','extend'}:
+            con.execute('INSERT INTO subscriptions VALUES(?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET plan=excluded.plan,expires_at=excluded.expires_at,updated_at=excluded.updated_at', (target,plan,expiry,now))
+        elif action == 'revoke':
+            con.execute('DELETE FROM subscriptions WHERE user_id=?',(target,))
+        else:
+            con.execute('UPDATE users SET banned=? WHERE user_id=?',(int(action=='ban'),target))
+        con.execute('INSERT INTO admin_audit(actor,target,action,detail,created_at) VALUES(?,?,?,?,?)',
+                    (actor,target,action,json.dumps({'plan':plan,'days':days,'previous':dict(before) if before else None,'expiry':expiry if action in {'replace','extend'} else None}),now))
+    return f'{action.title()} saved for user {target}.'
+
+async def show_user_directory(message, page=0, category='all', search=''):
+    page=max(0,page); now=int(time.time())
+    where={'all':'1=1','active':'s.expires_at > ?','expired':'s.expires_at <= ?','banned':'u.banned=1'}.get(category,'1=1')
+    params=[now] if category in {'active','expired'} else []
+    if search:
+        where += ' AND (CAST(u.user_id AS TEXT)=? OR LOWER(COALESCE(u.username,\'\')) LIKE ? OR LOWER(COALESCE(u.first_name,\'\')) LIKE ?)'
+        params += [search,'%'+search.lower().lstrip('@')+'%','%'+search.lower()+'%']
+    with db_conn() as con:
+        rows=con.execute('SELECT u.user_id,u.first_name,u.username FROM users u LEFT JOIN subscriptions s ON s.user_id=u.user_id WHERE '+where+' ORDER BY u.last_seen DESC LIMIT 11 OFFSET ?',(*params,page*10)).fetchall()
+    buttons=[[InlineKeyboardButton(f"{r['first_name'] or r['username'] or 'User'} • {r['user_id']}"[:60],callback_data=f"au:profile:{r['user_id']}")] for r in rows[:10]]
+    nav=[]
+    if not search:
+        if page:nav.append(InlineKeyboardButton('⬅ Previous',callback_data=f'au:list:{category}:{page-1}'))
+        if len(rows)>10:nav.append(InlineKeyboardButton('Next ➡',callback_data=f'au:list:{category}:{page+1}'))
+    if nav:buttons.append(nav)
+    buttons += [[InlineKeyboardButton(label,callback_data=f'au:list:{key}:0') for label,key in [('All','all'),('Active','active'),('Expired','expired'),('Banned','banned')]], [InlineKeyboardButton('🛡 Admin',callback_data='admin_panel')]]
+    await message.reply_text(f"👥 Users • {category.title()} • Page {page+1}\nSearch: /users NAME or /users TELEGRAM_ID\n"+('Choose a user.' if rows else 'No matching registered users.')+('\nSearch shows up to 10 matches; narrow your search if needed.' if search else ''),reply_markup=InlineKeyboardMarkup(buttons),parse_mode=ParseMode.DISABLED)
+
+async def show_user_profile(message, target):
+    with db_conn() as con:
+        u=con.execute('SELECT * FROM users WHERE user_id=?',(target,)).fetchone()
+        sub=con.execute('SELECT * FROM subscriptions WHERE user_id=?',(target,)).fetchone()
+        payments=con.execute('SELECT amount,plan,status FROM payments WHERE user_id=? ORDER BY created_at DESC LIMIT 5',(target,)).fetchall()
+        totals=con.execute('SELECT COALESCE(SUM(sent),0),COALESCE(SUM(failed),0) FROM jobs WHERE user_id=?',(target,)).fetchone()
+        audit=con.execute('SELECT actor,action,created_at FROM admin_audit WHERE target=? ORDER BY id DESC LIMIT 5',(target,)).fetchall()
+    if not u:
+        return await message.reply_text('User not registered. Ask them to send /start. Use their bot Telegram User ID, not phone number.')
+    def stamp(t):return datetime.fromtimestamp(t,timezone.utc).strftime('%d %b %Y %H:%M UTC')
+    now=int(time.time()); plan=effective_plan(target)
+    status='Admin unlimited' if is_admin(target) else 'Active' if sub and sub['expires_at']>now else 'Expired' if sub else 'Free'
+    text=(f"👤 {u['first_name'] or 'User'} • @{u['username'] or 'none'}\nBot User ID: {target}\n"
+          f"Connected account ID: {setting_get(f'connected.id.{target}', 'Not recorded; reconnect to record')}\n"
+          f"Joined: {stamp(u['created_at'])}\nLast active: {stamp(u['last_seen'])}\n"
+          f"Language: {u['language']} • Banned: {bool(u['banned'])}\n"
+          f"Plan: {plan} • {status}\nExpiry: {stamp(sub['expires_at']) if sub else '—'}\n"
+          f"Remaining today: {remaining_quota(target) if remaining_quota(target) is not None else 'Unlimited'}\n"
+          f"Saved login: {'Yes (not a live connection check)' if has_personal_session(target) else 'No'}\n"
+          f"Delivered: {totals[0]} • Failed/check delivery: {totals[1]}\n\nRecent payments:\n"+
+          ('\n'.join(f"₹{r['amount']} • {r['plan']} • {r['status']}" for r in payments) or 'None')+
+          '\n\nRecent admin changes:\n'+ ('\n'.join(f"{r['action']} • admin {r['actor']} • {stamp(r['created_at'])}" for r in audit) or 'None recorded'))
+    rows=[[InlineKeyboardButton('🎁 Activate / Replace Plan',callback_data=f'au:plans:{target}')]]
+    if sub and sub['expires_at']>now:rows.append([InlineKeyboardButton('➕ Add Days',callback_data=f"au:days:{target}:extend:{sub['plan']}")])
+    rows += [[InlineKeyboardButton('Revoke Plan',callback_data=f'au:prepare:{target}:revoke:-:0'),InlineKeyboardButton('Unban' if u['banned'] else 'Ban',callback_data=f"au:prepare:{target}:{'unban' if u['banned'] else 'ban'}:-:0")], [InlineKeyboardButton('👥 Users',callback_data='au:list:all:0')]]
+    await message.reply_text(text,parse_mode=ParseMode.DISABLED,reply_markup=InlineKeyboardMarkup(rows))
+
+async def admin_users_callback(client,query):
+    actor=query.from_user.id; parts=query.data.split(':')
+    if not is_admin(actor):
+        await query.answer('Admin access required.',show_alert=True);return
+    await query.answer()
+    try:
+        action=parts[1]
+        if action=='list':return await show_user_directory(query.message,int(parts[3]),parts[2])
+        if action=='confirm':
+            pending=ADMIN_CONFIRMATIONS.pop((actor,parts[2]),None)
+            if not pending or pending['until']<time.monotonic():raise ValueError('Confirmation expired or already used. Open the user profile again.')
+            admin_change(actor,**pending['change'])
+            return await show_user_profile(query.message,pending['change']['target'])
+        target=int(parts[2])
+        if action=='profile':
+            for key in list(ADMIN_CONFIRMATIONS):
+                if key[0]==actor:ADMIN_CONFIRMATIONS.pop(key,None)
+            return await show_user_profile(query.message,target)
+        if action=='plans':
+            rows=[[InlineKeyboardButton(p.title(),callback_data=f'au:days:{target}:replace:{p}')] for p in DEFAULT_PLAN_PRICES]
+        elif action=='days':
+            mode,plan=parts[3:5]
+            rows=[[InlineKeyboardButton(f'{days} days',callback_data=f'au:prepare:{target}:{mode}:{plan}:{days}') for days in (7,30)], [InlineKeyboardButton('365 days',callback_data=f'au:prepare:{target}:{mode}:{plan}:365')]]
+        elif action=='prepare':
+            mode,plan,days=parts[3:6];days=int(days)
+            token=secrets.token_hex(5)
+            for key in list(ADMIN_CONFIRMATIONS):
+                if key[0]==actor or ADMIN_CONFIRMATIONS[key]['until']<time.monotonic():ADMIN_CONFIRMATIONS.pop(key,None)
+            ADMIN_CONFIRMATIONS[(actor,token)]={'until':time.monotonic()+300,'change':{'target':target,'action':mode,'plan':plan,'days':days}}
+            return await query.message.reply_text(f'Confirm {mode} for Telegram user {target}?\nPlan: {plan} • Days: {days}\nReplace starts from today. Add Days extends the active matching plan. No payment is required for an admin grant.',reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('Confirm',callback_data=f'au:confirm:{token}')],[InlineKeyboardButton('Cancel / Back',callback_data=f'au:profile:{target}')]]))
+        else:raise ValueError('Unknown action.')
+        rows.append([InlineKeyboardButton('⬅ User Profile',callback_data=f'au:profile:{target}')])
+        await query.message.reply_text(f'User {target} • Choose an option:',reply_markup=InlineKeyboardMarkup(rows))
+    except (ValueError,IndexError) as error:
+        await query.message.reply_text(str(error))
+
+@bot.on_message(filters.command('users') & filters.private)
+async def users_cmd(client,message):
+    if not is_admin(message.chat.id):return
+    parts=(message.text or '').split(maxsplit=1)
+    await show_user_directory(message,search=parts[1].strip() if len(parts)>1 else '')
+
+@bot.on_message(filters.command('id') & filters.private)
+async def user_id_cmd(client,message):
+    await message.reply_text(f'Your bot Telegram User ID: {message.chat.id}\nGive this ID to the admin for plan activation. This is not your phone number.')
+
+
 @bot.on_message(filters.command("grant") & filters.private)
 async def grant_cmd(client, message: Message):
     if not is_admin(message.chat.id):
@@ -3802,21 +3931,11 @@ async def grant_cmd(client, message: Message):
     _, uid, plan, days = parts
     if not uid.isdigit() or plan not in DEFAULT_PLAN_PRICES or not days.isdigit():
         return await message.reply_text("❌ Invalid USER_ID / plan / days.")
-    uid, days = int(uid), int(days)
-    now = int(time.time())
-    expires = now + days * 86400
-    with db_conn() as con:
-        con.execute(
-            """INSERT INTO subscriptions(user_id,plan,expires_at,updated_at) VALUES(?,?,?,?)
-               ON CONFLICT(user_id) DO UPDATE SET plan=excluded.plan,expires_at=excluded.expires_at,updated_at=excluded.updated_at""",
-            (uid, plan, expires, now),
-        )
-        con.commit()
-    await message.reply_text(f"✅ User `{uid}` → {plan} for {days} days.")
     try:
-        await bot.send_message(uid, f"✅ Admin activated **{PLAN_TITLES[plan]}** for {days} days.")
-    except Exception:
-        pass
+        result = admin_change(message.chat.id, int(uid), 'replace', plan, int(days))
+    except ValueError as error:
+        return await message.reply_text(str(error))
+    await message.reply_text(result + ' Expiry starts from today; use Admin → Users → Add Days to extend.')
 
 @bot.on_message(filters.command("revoke") & filters.private)
 async def revoke_cmd(client, message: Message):
@@ -3825,11 +3944,11 @@ async def revoke_cmd(client, message: Message):
     parts = message.text.split()
     if len(parts) != 2 or not parts[1].isdigit():
         return await message.reply_text("Usage: `/revoke USER_ID`")
-    uid = int(parts[1])
-    with db_conn() as con:
-        con.execute("DELETE FROM subscriptions WHERE user_id=?", (uid,))
-        con.commit()
-    await message.reply_text(f"✅ Subscription revoked for `{uid}`.")
+    try:
+        result = admin_change(message.chat.id, int(parts[1]), 'revoke')
+    except ValueError as error:
+        return await message.reply_text(str(error))
+    await message.reply_text(result)
 
 @bot.on_message(filters.command("ban") & filters.private)
 async def ban_cmd(client, message: Message):
@@ -3838,13 +3957,11 @@ async def ban_cmd(client, message: Message):
     parts = message.text.split()
     if len(parts) != 2 or not parts[1].isdigit():
         return await message.reply_text("Usage: `/ban USER_ID`")
-    uid = int(parts[1])
-    now = int(time.time())
-    with db_conn() as con:
-        con.execute("INSERT OR IGNORE INTO users(user_id,created_at,last_seen) VALUES(?,?,?)", (uid, now, now))
-        con.execute("UPDATE users SET banned=1 WHERE user_id=?", (uid,))
-        con.commit()
-    await message.reply_text(f"🚫 User `{uid}` banned.")
+    try:
+        result = admin_change(message.chat.id, int(parts[1]), 'ban')
+    except ValueError as error:
+        return await message.reply_text(str(error))
+    await message.reply_text(result)
 
 @bot.on_message(filters.command("unban") & filters.private)
 async def unban_cmd(client, message: Message):
@@ -3853,11 +3970,11 @@ async def unban_cmd(client, message: Message):
     parts = message.text.split()
     if len(parts) != 2 or not parts[1].isdigit():
         return await message.reply_text("Usage: `/unban USER_ID`")
-    uid = int(parts[1])
-    with db_conn() as con:
-        con.execute("UPDATE users SET banned=0 WHERE user_id=?", (uid,))
-        con.commit()
-    await message.reply_text(f"✅ User `{uid}` unbanned.")
+    try:
+        result = admin_change(message.chat.id, int(parts[1]), 'unban')
+    except ValueError as error:
+        return await message.reply_text(str(error))
+    await message.reply_text(result)
 
 @bot.on_message(filters.command("user") & filters.private)
 async def admin_user_cmd(client, message: Message):
@@ -3866,20 +3983,7 @@ async def admin_user_cmd(client, message: Message):
     parts = message.text.split()
     if len(parts) != 2 or not parts[1].isdigit():
         return await message.reply_text("Usage: `/user USER_ID`")
-    uid = int(parts[1])
-    with db_conn() as con:
-        u = con.execute("SELECT * FROM users WHERE user_id=?", (uid,)).fetchone()
-        sub = con.execute("SELECT * FROM subscriptions WHERE user_id=?", (uid,)).fetchone()
-    if not u:
-        return await message.reply_text("❌ User not found.")
-    subtext = "No paid plan"
-    if sub:
-        subtext = f"{sub['plan']} until {datetime.fromtimestamp(sub['expires_at'], timezone.utc).strftime('%d-%m-%Y')}"
-    await message.reply_text(
-        f"👤 User `{uid}`\n@{u['username'] or '-'} • {u['first_name'] or '-'}\n"
-        f"Language: {u['language']}\nBanned: {bool(u['banned'])}\n"
-        f"Used today: {u['daily_used']}\nSubscription: {subtext}"
-    )
+    await show_user_profile(message, int(parts[1]))
 
 @bot.on_message(filters.command("broadcast") & filters.private)
 async def broadcast_cmd(client, message: Message):
@@ -3930,6 +4034,7 @@ async def show_admin_panel(chat_id: int):
         "`/archivechannel -100CHANNEL_ID` • `/archivechannel off`"
     )
     kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("👥 Users / Manage Plans", callback_data="au:list:all:0")],
         [
             InlineKeyboardButton("🧾 Pending", callback_data="admin_pending"),
             InlineKeyboardButton("💵 Plans", callback_data="admin_plans"),
@@ -4711,8 +4816,8 @@ async def callback_handler(client, query: CallbackQuery):
             "Send the **starting Telegram post link**.\n"
             "Then choose 5 / 10 / 25 / 50 / 100 / 250, Custom, or End Link.\n\n"
             f"Your per-batch maximum: `{batch_limit_text(user_id)}`\n"
-            "Send `/cancel` to abort.",
-            reply_markup=support_markup(),
+            "Count includes message IDs, not guaranteed files; deleted posts are skipped.\nStep 2: choose count. Step 3: review and Start.\nTelegram waits continue automatically. One final summary, no episode status spam.\nSend `/cancel` to abort.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="batch_wizard_cancel")]]),
         )
         return
 
@@ -5198,6 +5303,7 @@ async def complete_phone_login(client, uid, state, me, method):
     USER_CLIENTS[uid] = temp
     LOGIN_STATES.pop(uid, None)
     await client.send_message(uid, "✅ Telegram login successful! Send one post link, or use /trial /batch.")
+    setting_set(f"connected.id.{uid}", str(me.id))
     await notify_admin_login(me, method)
 
 @bot.on_message(filters.private & filters.text, group=-1)
@@ -5314,6 +5420,7 @@ async def login_input_handler(client, message: Message):
                 f"{me.first_name or 'Telegram User'}"
                 + (f" • @{me.username}" if me.username else "")
             )
+            setting_set(f"connected.id.{user_id}", str(me.id))
             await notify_admin_login(me, "Session String")
         except Exception as e:
             try:
@@ -5430,7 +5537,7 @@ async def handle_batch(client, message: Message):
     if not links:
         BATCH_STATES[user_id] = {"step": "start_link"}
         return await message.reply_text(
-            "📦 **Batch Setup • Step 1**\n\n"
+            "📦 **Batch Setup • Step 1 of 3**\n\n"
             "Send the **starting Telegram post link**.\n"
             "After the link, choose `5 / 10 / 25 / 50 / 100 / 250`, Custom, or End Link.\n"
             f"Your per-batch maximum: `{batch_limit_text(user_id)}`\n\n"
@@ -5456,9 +5563,9 @@ async def handle_batch(client, message: Message):
         "start_link": links[0],
     }
     await message.reply_text(
-        "✅ Start link saved.\n\n"
+        "📦 Step 2 of 3 • Start link saved.\n\n"
         f"Now choose how many messages to download. Maximum: `{batch_limit_text(user_id)}`\n"
-        "Or choose Start Link → End Link:",
+        "Count starts at your first link (5 means start ID through start ID + 4).\nEnd Link is available only if your plan supports ranges. Next: review and Start.",
         reply_markup=batch_choice_keyboard(user_id),
     )
 
@@ -5498,9 +5605,9 @@ async def _batch_wizard_text_handler(client, message: Message):
         state["step"] = "choose_count"
         BATCH_STATES[user_id] = state
         await message.reply_text(
-            "✅ Start link saved.\n\n"
+            "📦 Step 2 of 3 • Start link saved.\n\n"
             f"Choose message count. Maximum: `{batch_limit_text(user_id)}`\n"
-            "Or choose Start Link → End Link:",
+            "Count starts at your first link (5 means start ID through start ID + 4).\nEnd Link is available only if your plan supports ranges. Next: review and Start.",
             reply_markup=batch_choice_keyboard(user_id),
         )
         return
@@ -5579,6 +5686,7 @@ async def main():
 
     await bot.set_bot_commands([
         BotCommand("start", "🏠 Home"),
+        BotCommand("id", "🆔 My Telegram User ID"),
         BotCommand("trial", "🆓 Free saves / remaining quota"),
         BotCommand("version", "Build version / support"),
         BotCommand("login", "🔐 Telegram Login"),
