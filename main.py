@@ -2,7 +2,7 @@
 # Python 3.10+; existing Pyrogram-compatible environment required.
 # Added: isolated jobs, cancel/pause/resume, history, atomic payment review.
 import os
-BOT_VERSION = "2026.10.13-easy-menu14"
+BOT_VERSION = "2026.10.13-review-consent15"
 import re
 import asyncio
 import time
@@ -989,7 +989,7 @@ def customization_preview_text(user_id: int):
         + "\n\nThis is a text preview. Telegram controls the actual player layout."
     )
 
-def plan_text(user_id: int) -> str:
+def _plan_text_without_review_notice(user_id: int) -> str:
     lines_en = [
         "╔═══════════════════════════════╗",
         "║   🛒  CHOOSE YOUR PLAN        ║",
@@ -1241,6 +1241,11 @@ def manual_text(user_id: int):
         "\n\nAudio branding: /settings → Audio Title / Artist → Artist பெயர் → Clean card ON. Sample போல caption இல்லாத audio card வரும். புதிய sends மட்டும் மாறும். Preview sample-ஐ காட்டும்.") + tr(user_id,
         "\n\nNew controls: /status /pause /resume /cancel /history /payments\nPause applies after the current message. History survives restart; jobs do not auto-resume. Admin batch default is unlimited. Other users receive files privately.",
         "\n\nபுதிய commands: /status /pause /resume /cancel /history /payments\nதற்போதைய message முடிந்ததும் pause ஆகும். Restart ஆனாலும் history இருக்கும்; job தானாக resume ஆகாது. Admin batch default unlimited. மற்ற users-க்கு files தனிப்பட்ட chat-ல் வரும்.")
+
+def plan_text(user_id: int) -> str:
+    return _plan_text_without_review_notice(user_id) + tr(user_id,
+        "\n\n📁 Before buying: downloads require explicit owner-review consent. Delivered files/captions and your name, User ID and Job ID are shared with the review channel. Settings → Owner Copy explains the terms. Declining blocks downloads, including paid plans.",
+        "\n\n📁 வாங்கும்முன்: downloads-க்கு owner-review சம்மதம் கட்டாயம். Files/captions மற்றும் பெயர், User ID, Job ID review channel-க்கு அனுப்பப்படும். Settings → Owner Copy-ல் விவரம் உள்ளது. மறுத்தால் paid plan உட்பட downloads தொடங்காது.")
 
 def quick_start_text(user_id: int):
     free_limit = get_daily_limit("free")
@@ -2719,9 +2724,28 @@ def owner_archive_channel():
     except (ValueError, TypeError):
         return 0
 
+def review_consent_valid(uid):
+    channel = owner_archive_channel()
+    return bool(channel and setting_get(f'review.v1.{uid}', '0') == str(channel))
+
+async def show_review_consent(message, uid):
+    channel = owner_archive_channel()
+    body = tr(uid,
+        f"📁 Required owner review\nChannel: {channel}\n\nTo use downloads, you must agree that delivered files and captions (including private-source files), your name, Telegram User ID and Job ID are shared with this channel's owner/admin reviewers. Channel members can see these copies. Only save/share files you have permission to use.\nLogin alone is not consent. Declining prevents new downloads. Turning OFF stops subsequent files; an in-flight delivery may finish. Existing copies remain. Login secrets/payment messages are not copied. Contact Support to appeal a ban or request removal of an existing copy.",
+        f"📁 கட்டாய owner review\nChannel: {channel}\n\nDownload பயன்படுத்த, files / captions (private-source files உட்பட), உங்கள் பெயர், Telegram User ID, Job ID இந்த channel-க்கு அனுப்பப்படும் என்பதை ஏற்க வேண்டும். Channel members copies பார்க்கலாம். அனுமதி உள்ள files மட்டும் சேமித்து பகிருங்கள்.\nLogin மட்டும் சம்மதம் அல்ல. வேண்டாம் என்றால் புதிய downloads தொடங்காது. OFF செய்தால் அடுத்த files நிற்கும்; ஏற்கெனவே அனுப்பிக்கொண்டிருக்கும் file முடியலாம். பழைய copies இருக்கும். Login secrets/payment messages copy ஆகாது. Ban appeal அல்லது பழைய copy நீக்க Support தொடர்புகொள்ளவும்.")
+    rows = []
+    if channel:
+        rows.append([InlineKeyboardButton('சம்மதிக்கிறேன் / I agree', callback_data=f'review:agree:{channel}')])
+    else:
+        body += '\nOwner review is unavailable. Downloads are temporarily unavailable; contact Support.'
+    rows.append([InlineKeyboardButton('வேண்டாம் / OFF', callback_data='archive:off')])
+    rows.append([InlineKeyboardButton('🏠 Home', callback_data='home_menu')])
+    if support_row():rows.append(support_row())
+    await message.reply_text(body, parse_mode=ParseMode.DISABLED, reply_markup=InlineKeyboardMarkup(rows))
+
 async def copy_to_owner(client, uid, delivered):
     channel = owner_archive_channel()
-    if not channel or setting_get(f'archive.consent.{uid}', '0') != str(channel):
+    if not review_consent_valid(uid):
         return
     if delivered.chat.id == channel:
         return
@@ -2733,12 +2757,22 @@ async def copy_to_owner(client, uid, delivered):
     status = 'uncertain'
     task = None
     try:
-        # Optional copy gets one attempt. Never retry a delivered user file.
+        # Review copy gets one attempt. Never retry a delivered user file.
         task = asyncio.create_task(client.copy_message(channel, delivered.chat.id, delivered.id))
         done, _ = await asyncio.wait({task}, timeout=5)
         if task in done:
-            await task
-            status = 'sent'
+            copied = await task
+            # A separate reply preserves the file's original caption.
+            with db_conn() as con:
+                user = con.execute('SELECT first_name,username FROM users WHERE user_id=?',(uid,)).fetchone()
+            name = (user['first_name'] or 'User') if user else 'User'
+            username = ('@'+user['username']) if user and user['username'] else '—'
+            job = JOB_META.get(uid, {}).get('job_id', 'unknown')
+            await bounded_operation(client.send_message(channel,
+                f"Owner review\nName: {name}\nUsername: {username}\nTelegram User ID: {uid}\nJob ID: {job}",
+                reply_to_message_id=copied.id, parse_mode=ParseMode.DISABLED,
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('👤 View User • Admin only',callback_data=f'review:user:{uid}')]])), 'Owner review details', 5)
+            status = 'sent' 
         else:
             task.cancel()
     except FloodWait as error:
@@ -2764,7 +2798,7 @@ async def archive_channel_cmd(client, message):
         return
     parts = (message.text or '').split()
     if len(parts) != 2:
-        return await message.reply_text('Usage: /archivechannel -100CHANNEL_ID or /archivechannel off. Add the bot to your owner channel with permission to post. Users must opt in under Settings → Owner Copy / Privacy.')
+        return await message.reply_text('Usage: /archivechannel -100CHANNEL_ID or /archivechannel off. Add the bot to your owner channel with permission to post. Downloads require explicit review consent under Settings → Owner Copy / Privacy; changing or disabling the channel blocks downloads until consent/configuration is restored.')
     if parts[1].lower() == 'off':
         setting_set('owner_archive_channel', '0')
         return await message.reply_text('Owner copying disabled.')
@@ -2778,7 +2812,7 @@ async def archive_channel_cmd(client, message):
         return await message.reply_text('Cannot access that channel. Add the bot with permission to post, then retry.')
     setting_set('owner_archive_channel', parts[1])
     setting_set('owner_archive_title', str(getattr(chat, 'title', '') or parts[1]))
-    await message.reply_text('Owner channel saved. Copying is OFF for users until they opt in to this channel under Settings → Owner Copy / Privacy.')
+    await message.reply_text('Owner channel saved. Users need explicit review consent for this channel before downloads. Configure channel membership for owner/admin reviewers only.')
 
 async def destination_for(user_id: int):
     return int(DUMP_CHANNEL) if DUMP_CHANNEL and is_admin(user_id) else user_id
@@ -2819,6 +2853,8 @@ def managed_job(kind):
                 return
             if uid in BRAND_STATES or uid in LOGIN_STATES:
                 return await message.reply_text("Finish setup/login or use /cancel first.")
+            if not review_consent_valid(uid):
+                return await show_review_consent(message, uid)
             if RECOVERING_OPERATIONS:
                 return await message.reply_text("⏳ A network operation is still stopping. New jobs are temporarily blocked to prevent duplicate sends. Try /status shortly; contact /support if this persists.")
             if uid in JOB_TASKS:
@@ -3099,6 +3135,10 @@ async def run_transfer_job(client, message, uid, kind, start_link=None, end_link
             await wait_telegram(client)
             if index > 1 and SEND_DELAY:
                 await asyncio.sleep(SEND_DELAY)
+            if not review_consent_valid(uid):
+                meta['outcome'] = 'stopped_review'
+                await show_review_consent(message, uid)
+                break
             allowed, reason = feature_allowed(uid, feature, 1)
             if not allowed:
                 meta['outcome'] = 'stopped_limit'
@@ -3178,7 +3218,13 @@ async def run_transfer_job(client, message, uid, kind, start_link=None, end_link
                 await _safe_status_edit(overall, overall_card(kind,total,processed,sent,skipped,failed,uncertain))
             if state == 'sent' and ctx.get('delivered_message'):
                 await copy_to_owner(client, uid, ctx['delivered_message'])
+                if meta.get('owner_copy_failed'):
+                    meta['outcome'] = 'stopped_review'
+                    await message.reply_text('Owner review copy could not be confirmed. Stopping remaining files; contact Support. Your delivered file will not be resent automatically.')
+                    break
         ending = 'Task complete' if processed == total and not failed and not uncertain else 'Task finished — review results'
+        if meta.get('outcome') == 'stopped_review':
+            ending = 'Stopped — owner review consent withdrawn/unavailable'
         if meta.get('outcome') == 'stopped_limit':
             ending = 'Stopped — plan/limit changed'
         body = overall_card(kind,total,processed,sent,skipped,failed,uncertain,ending)
@@ -3394,31 +3440,27 @@ async def handle_new_callback(client, query):
             await query.answer()
             await run_retry_request(client,query.message,uid,parent)
         return True
-    if data.startswith('archive:'):
+    if data.startswith('review:agree:'):
         channel = owner_archive_channel()
+        if not channel or data.rsplit(':',1)[1] != str(channel):
+            await query.answer('Channel changed. Read the current review notice.',show_alert=True)
+            await show_review_consent(query.message,uid)
+            return True
+        setting_set(f'review.v1.{uid}',str(channel))
+        setting_set(f'review.accepted_at.{uid}',str(int(time.time())))
+        await query.answer('Consent saved. You can now start a download.')
+        await query.message.reply_text('✅ Review consent saved. Send your post link again or choose Download.',reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('📥 Download',callback_data='download_menu')]]))
+        return True
+    if data.startswith('archive:'):
         if data == 'archive:off':
-            setting_set(f'archive.consent.{uid}', '0')
-            await query.answer('Future owner copies disabled.')
+            setting_set(f'review.v1.{uid}','0')
+            setting_set(f'archive.consent.{uid}','0')
+            await query.answer('Consent withdrawn. Subsequent downloads are blocked.')
         elif data.startswith('archive:on:'):
-            if not channel or data.rsplit(':', 1)[1] != str(channel):
-                await query.answer('Channel changed. Open Owner Copy again.', show_alert=True)
-                return True
-            setting_set(f'archive.consent.{uid}', str(channel))
-            await query.answer('Owner copies enabled for future files.')
+            await query.answer('Channel changed or review terms updated. Read and agree below.',show_alert=True)
         else:
             await query.answer()
-        enabled = bool(channel and setting_get(f'archive.consent.{uid}', '0') == str(channel))
-        title = setting_get('owner_archive_title', str(channel))
-        body = (f"📁 Owner Copy / Privacy — {'ON' if enabled else 'OFF'}\n\n"
-                f"Owner channel: {title} ({channel})\n\n"
-                "If you enable sharing, files delivered by this bot, including their captions, will also be copied to this channel and can be viewed by its members. Private-channel files are included. Only share content you are authorized to share.\n\n"
-                "Login secrets and payment messages are never copied by this feature. You can turn it off anytime for future files; copies already sent remain in the channel. Downloads work with sharing OFF.") if channel else "📁 Owner copying is OFF. No owner channel has been configured."
-        rows = []
-        if channel:
-            rows.append([InlineKeyboardButton('I agree — enable copies', callback_data=f'archive:on:{channel}')])
-        rows.append([InlineKeyboardButton('Turn OFF / Keep private', callback_data='archive:off')])
-        rows.append([InlineKeyboardButton('⬅ Settings', callback_data='settings_menu')])
-        await query.message.reply_text(body, parse_mode=ParseMode.DISABLED, reply_markup=InlineKeyboardMarkup(rows))
+        await show_review_consent(query.message,uid)
         return True
     if data in {'home_menu', 'settings_home'}:
         await query.answer()
@@ -3548,8 +3590,8 @@ async def trial_cmd(client, message):
 @bot.on_message(filters.command("safety") & filters.private)
 async def safety_cmd(client, message):
     await message.reply_text(tr(message.chat.id,
-        "🛡 Safety & Privacy\nUse files you own or have permission to save. Your connected account needs access to the source.\nOwner Copy is optional: Settings → Owner Copy shows the destination and consent controls. Turning it off stops future copies; existing copies remain.\nAdmins can view profile, plan, usage and payment records; OTP/password/session strings must never be sent to admins.\nDisconnect your account through Login → Logout. Check Telegram Settings → Devices to revoke a server session.\nNever reuse the same session string across running servers.\nUnlimited means no bot daily quota, not exemption from Telegram limits. Waits resume automatically; /status shows the current stage.\nIf delivery is uncertain, check your chat before retrying to avoid duplicates.",
-        "🛡 பாதுகாப்பு / Privacy\nஉங்களுடைய அல்லது சேமிக்க அனுமதி உள்ள files மட்டும் பயன்படுத்துங்கள். Source-க்கு உங்கள் account-ல் access தேவை.\nOwner Copy விருப்பத் தேர்வு: Settings → Owner Copy-ல் channel மற்றும் consent பார்க்கலாம். OFF செய்தால் இனிவரும் copies நிற்கும்; பழைய copies நீங்காது.\nAdmin-க்கு profile, plan, usage, payment விவரங்கள் தெரியும். OTP/password/session string-ஐ admin-க்கு அனுப்பாதீர்கள்.\nLogin → Logout மூலம் disconnect செய்யலாம். Telegram Settings → Devices-ல் server session-ஐ revoke செய்யலாம்.\nஒரே session string-ஐ பல running servers-ல் பயன்படுத்தாதீர்கள்.\nUnlimited plan-க்கும் Telegram limits பொருந்தும். Wait முடிந்ததும் தானாகத் தொடரும்; /status பார்க்கவும்.\nDelivery உறுதி இல்லாவிட்டால் retry முன் chat-ல் file வந்துள்ளதா பாருங்கள்."),
+        "🛡 Safety & Privacy\nUse files you own or have permission to save. Your connected account needs access to the source.\nOwner review is required for downloads: Settings → Owner Copy shows the destination and consent controls. Turning it off blocks subsequent downloads/copies; existing copies remain.\nAdmins can view profile, plan, usage and payment records; OTP/password/session strings must never be sent to admins.\nDisconnect your account through Login → Logout. Check Telegram Settings → Devices to revoke a server session.\nNever reuse the same session string across running servers.\nUnlimited means no bot daily quota, not exemption from Telegram limits. Waits resume automatically; /status shows the current stage.\nIf delivery is uncertain, check your chat before retrying to avoid duplicates.",
+        "🛡 பாதுகாப்பு / Privacy\nஉங்களுடைய அல்லது சேமிக்க அனுமதி உள்ள files மட்டும் பயன்படுத்துங்கள். Source-க்கு உங்கள் account-ல் access தேவை.\nDownloads-க்கு Owner review சம்மதம் கட்டாயம்: Settings → Owner Copy-ல் channel மற்றும் consent பார்க்கலாம். OFF செய்தால் அடுத்த downloads/copies நிற்கும்; பழைய copies நீங்காது.\nAdmin-க்கு profile, plan, usage, payment விவரங்கள் தெரியும். OTP/password/session string-ஐ admin-க்கு அனுப்பாதீர்கள்.\nLogin → Logout மூலம் disconnect செய்யலாம். Telegram Settings → Devices-ல் server session-ஐ revoke செய்யலாம்.\nஒரே session string-ஐ பல running servers-ல் பயன்படுத்தாதீர்கள்.\nUnlimited plan-க்கும் Telegram limits பொருந்தும். Wait முடிந்ததும் தானாகத் தொடரும்; /status பார்க்கவும்.\nDelivery உறுதி இல்லாவிட்டால் retry முன் chat-ல் file வந்துள்ளதா பாருங்கள்."),
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('📁 Owner Copy',callback_data='archive:menu'),InlineKeyboardButton('🔐 Account',callback_data='login_menu')],[InlineKeyboardButton('🏠 Home',callback_data='home_menu')]]))
 
 @bot.on_message(filters.command("version") & filters.private)
@@ -3653,8 +3695,8 @@ async def start_cmd(client, message: Message):
 
     plan = "💎 Admin Unlimited" if is_admin(user_id) else PLAN_TITLES.get(effective_plan(user_id), "Free")
     text = tr(user_id,
-        f"🌟 Welcome to SavePro\nYour plan: {plan}\n\nPaste one Telegram post link, or tap Download to get started.\nBatch saves several posts in order.\nMy Plan shows trial, daily balance, prices and expiry.\nSettings controls branding, language and privacy.\n\nTelegram waits may apply; /status shows progress.",
-        f"🌟 SavePro-க்கு வரவேற்கிறோம்\nஉங்கள் plan: {plan}\n\nஒரு Telegram post link அனுப்புங்கள் அல்லது Download தேர்வு செய்யுங்கள்.\nBatch மூலம் பல posts-ஐ வரிசையாகச் சேமிக்கலாம்.\nMy Plan-ல் trial, balance, விலை, expiry பார்க்கலாம்.\nSettings-ல் branding, மொழி, privacy மாற்றலாம்.\n\nTelegram wait வரலாம்; /status மூலம் நிலையைப் பார்க்கலாம்.")
+        f"🌟 Welcome to SavePro\nYour plan: {plan}\n\nPaste one Telegram post link, or tap Download to get started.\nBatch saves several posts in order.\nMy Plan shows trial, daily balance, prices and expiry. Downloads require owner-review consent; Settings → Owner Copy explains sharing.\nSettings controls branding, language and privacy.\n\nTelegram waits may apply; /status shows progress.",
+        f"🌟 SavePro-க்கு வரவேற்கிறோம்\nஉங்கள் plan: {plan}\n\nஒரு Telegram post link அனுப்புங்கள் அல்லது Download தேர்வு செய்யுங்கள்.\nBatch மூலம் பல posts-ஐ வரிசையாகச் சேமிக்கலாம்.\nMy Plan-ல் trial, balance, விலை, expiry பார்க்கலாம். Downloads-க்கு owner-review சம்மதம் தேவை; Settings → Owner Copy பார்க்கவும்.\nSettings-ல் branding, மொழி, privacy மாற்றலாம்.\n\nTelegram wait வரலாம்; /status மூலம் நிலையைப் பார்க்கலாம்.")
 
     await message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard_rows))
 
@@ -4111,6 +4153,18 @@ async def show_admin_panel(chat_id: int):
 @bot.on_callback_query()
 async def callback_handler(client, query: CallbackQuery):
     user_id = query.from_user.id
+    if (query.data or '').startswith('review:user:'):
+        if not is_admin(user_id):
+            return await query.answer('Admin access required.',show_alert=True)
+        try:target = int(query.data.rsplit(':',1)[1])
+        except ValueError:return await query.answer('Invalid user.',show_alert=True)
+        await query.answer('Open your private bot chat for user details.')
+        try:
+            private_message = await client.send_message(user_id,'👤 Owner review — user details')
+            await show_user_profile(private_message,target)
+        except Exception:
+            await query.answer('Start the bot privately, then use /user with this User ID.',show_alert=True)
+        return
     if not query.message or query.message.chat.id != user_id:
         return await query.answer('Open a private chat with this bot to manage your account.', show_alert=True)
     touch_query_user(query)
