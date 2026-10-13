@@ -2,7 +2,7 @@
 # Python 3.10+; existing Pyrogram-compatible environment required.
 # Added: isolated jobs, cancel/pause/resume, history, atomic payment review.
 import os
-BOT_VERSION = "2026.10.13-public-safety13"
+BOT_VERSION = "2026.10.13-easy-menu14"
 import re
 import asyncio
 import time
@@ -869,10 +869,10 @@ def customization_summary(user_id: int):
         f"🎧 Audio: **{'CUSTOM' if audio_custom else 'ORIGINAL'}**\n"
         f"🧩 Advanced text: **{'ON' if advanced_text else 'OFF'}**\n\n"
         + tr(user_id,
-            "✨ Quick Setup guides you through audio branding.\n"
+            "✨ Advanced Settings → Quick Setup guides audio branding.\n"
             "Changes apply to new sends. 🔒 marks features outside your plan.\n"
             "Use Preview before downloading; Settings Guide explains every option.",
-            "✨ Quick Setup மூலம் audio branding அமைக்கலாம்.\n"
+            "✨ Advanced Settings → Quick Setup மூலம் audio branding அமைக்கலாம்.\n"
             "புதிய sends-க்கு மாற்றங்கள் பொருந்தும். 🔒 = உங்கள் plan-ல் இல்லை.\n"
             "Download முன் Preview பாருங்கள்; Settings Guide-ல் விளக்கம் உள்ளது.")
     )
@@ -883,30 +883,14 @@ def settings_keyboard(user_id: int):
         return "" if customization_allowed(user_id, feature) else " 🔒"
 
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton(f"✨ Quick Setup{lock('audio')}", callback_data="brand:start")],
-        [InlineKeyboardButton("❓ Settings Guide", callback_data="settings_guide")],
-        [InlineKeyboardButton("📁 Owner Copy / Privacy", callback_data="archive:menu")],
-        [InlineKeyboardButton("🛡 Safety / Privacy Help", callback_data="safety:menu")],
-        [
-            InlineKeyboardButton(f"✍️ Caption{lock('caption')}", callback_data="cust:caption"),
-            InlineKeyboardButton(f"🏷 Watermark{lock('watermark')}", callback_data="cust:watermark"),
-        ],
-        [
-            InlineKeyboardButton(f"🖼 Thumbnail{lock('thumbnail')}", callback_data="cust:thumbnail"),
-            InlineKeyboardButton(f"🎧 Audio Branding{lock('audio')}", callback_data="cust:audio"),
-        ],
-        [InlineKeyboardButton(f"🧩 Advanced Text{lock('text')}", callback_data="cust:text")],
-        [
-            InlineKeyboardButton("👁 Preview", callback_data="cust:preview"),
-            InlineKeyboardButton("↩ Reset Branding", callback_data="cust:reset"),
-        ],
-        [InlineKeyboardButton("🔐 Account / Login", callback_data="login_menu"),
-         InlineKeyboardButton("🌐 Language", callback_data="language_menu")],
-        [
-            InlineKeyboardButton("🛒 Plans", callback_data="plans_menu"),
-            InlineKeyboardButton("🏠 Home", callback_data="home_menu"),
-        ],
+        [InlineKeyboardButton(f"✍ Caption{lock('caption')}", callback_data='cust:caption'), InlineKeyboardButton(f"🖼 Thumbnail{lock('thumbnail')}", callback_data='cust:thumbnail')],
+        [InlineKeyboardButton(f"🏷 Watermark{lock('watermark')}", callback_data='cust:watermark'), InlineKeyboardButton('👁 Preview', callback_data='cust:preview')],
+        [InlineKeyboardButton('🔐 Account / Login', callback_data='login_menu'), InlineKeyboardButton('🌐 Language', callback_data='language_menu')],
+        [InlineKeyboardButton('📁 Owner Copy / Privacy', callback_data='archive:menu')],
+        [InlineKeyboardButton('🧩 Advanced Settings', callback_data='advanced_settings')],
+        [InlineKeyboardButton('❓ Settings Guide', callback_data='settings_guide'), InlineKeyboardButton('🏠 Home', callback_data='home_menu')],
     ])
+
 
 
 def caption_settings_keyboard(user_id=None):
@@ -1294,7 +1278,7 @@ def plans_keyboard():
 def help_hub_keyboard():
     rows = [
         [
-            InlineKeyboardButton("⚡ Quick Start", callback_data="quick_start"),
+            InlineKeyboardButton("📥 First Download", callback_data="download_menu"),
             InlineKeyboardButton("📘 Full Manual", callback_data="manual_menu"),
         ],
         [
@@ -1306,6 +1290,7 @@ def help_hub_keyboard():
             InlineKeyboardButton("🏠 Home", callback_data="home_menu"),
         ],
     ]
+    rows.insert(1, [InlineKeyboardButton('⏳ Download Stuck?',callback_data='help_stuck'), InlineKeyboardButton('💳 Payment Help',callback_data='help_payment')])
     row = support_row()
     if row:
         rows.append(row)
@@ -3332,6 +3317,32 @@ async def handle_new_callback(client, query):
         await query.answer()
         await safety_cmd(client, query.message)
         return True
+    if data in {'download_menu', 'account_plan_menu', 'advanced_settings', 'help_stuck', 'help_payment'}:
+        await query.answer()
+        if data == 'download_menu':
+            body = tr(uid, '📥 Download\n1. Connect your account if the source requires it.\n2. Choose Single, Batch or Clone and send a post link.\n3. Files arrive with one final summary. Your account must have source access.',
+                '📥 Download\n1. Source-க்கு தேவைப்பட்டால் account connect செய்யுங்கள்.\n2. Single, Batch அல்லது Clone தேர்வு செய்து post link அனுப்புங்கள்.\n3. Files மற்றும் கடைசியில் summary கிடைக்கும். Source-க்கு account access தேவை.')
+            rows = [[InlineKeyboardButton('🔐 Connect Account',callback_data='login_menu')], [InlineKeyboardButton('📥 Single',callback_data='save_single'),InlineKeyboardButton('📦 Batch',callback_data='batch_new')], [InlineKeyboardButton('♻ Clone • Ultimate',callback_data='save_clone')]]
+        elif data == 'account_plan_menu':
+            body = subscription_text(uid) + tr(uid, '\n\nCheck included features and limits before paying. Unlimited plans still respect Telegram waits.', '\n\nPayment முன் features / limits பார்க்கவும். Unlimited plan-க்கும் Telegram wait பொருந்தும்.')
+            rows = [[InlineKeyboardButton('🎁 Trial / Free Balance',callback_data='free_trial')], [InlineKeyboardButton('🛒 Compare Plans / Prices',callback_data='plans_menu')], [InlineKeyboardButton('💳 Payment Help',callback_data='help_payment')]]
+        elif data == 'advanced_settings':
+            body = tr(uid, '🧩 Advanced Settings\nAudio Branding changes the displayed title/artist. Advanced Text adds a prefix/suffix to text posts. Quick Setup previews audio branding before applying it. Reset Branding requires confirmation. Premium features remain plan-gated.',
+                '🧩 Advanced Settings\nAudio Branding: title/artist மாற்றம். Advanced Text: text posts-க்கு prefix/suffix. Quick Setup: apply முன் preview. Reset Branding-க்கு confirmation தேவை. Premium features-க்கு உரிய plan தேவை.')
+            rows = [[InlineKeyboardButton('🎧 Audio Branding' + ('' if customization_allowed(uid,'audio') else ' 🔒'),callback_data='cust:audio'),InlineKeyboardButton('🧩 Advanced Text' + ('' if customization_allowed(uid,'text') else ' 🔒'),callback_data='cust:text')], [InlineKeyboardButton('✨ Quick Setup' + ('' if customization_allowed(uid,'audio') else ' 🔒'),callback_data='brand:start'),InlineKeyboardButton('↩ Reset Branding',callback_data='cust:reset')], [InlineKeyboardButton('🛡 Safety / Privacy',callback_data='safety:menu')], [InlineKeyboardButton('⬅ Settings',callback_data='settings_menu')]]
+        elif data == 'help_stuck':
+            body = tr(uid, '⏳ Download not moving?\n• /status shows the stage and Telegram wait. Let a rate-limit wait finish; repeated Resume does not speed it up.\n• /history shows earlier job results after a restart.\n• For login/session errors, stop the job and reconnect through Account.\n• Check that the connected account can open the source post.\n• If delivery is uncertain, check your files before Retry Failed to avoid duplicates.\n• Send Support your /version and error screenshot, without OTP/password/session strings.',
+                '⏳ Download நகரவில்லையா?\n• /status-ல் stage / Telegram wait பார்க்கவும். Wait முடியட்டும்; மீண்டும் Resume கொடுத்தால் வேகம் கூடாது.\n• Restart பின் /history-ல் job முடிவுகளைப் பார்க்கவும்.\n• Login/session error என்றால் job-ஐ நிறுத்தி Account மூலம் reconnect செய்யவும்.\n• Connected account-ல் source post திறக்கிறதா பார்க்கவும்.\n• Delivery உறுதி இல்லாவிட்டால் Retry முன் file வந்துள்ளதா பார்க்கவும்.\n• Support-க்கு /version மற்றும் error screenshot அனுப்பலாம்; OTP/password/session string அனுப்பாதீர்கள்.')
+            rows = [[InlineKeyboardButton('🔐 Account',callback_data='login_menu')]]
+            if support_row():rows.append(support_row())
+        else:
+            body = tr(uid, '💳 Payment Help\nOpen My Plan → Compare Plans, choose a plan and period, then follow that invoice. Check the displayed amount and recipient before paying.\nA screenshot alone does not guarantee approval. Check My Plan after approval. If still pending, contact Support with your invoice/payment reference; do not pay again just because approval is delayed. Never share OTPs or banking passwords.',
+                '💳 Payment உதவி\nMy Plan → Compare Plans-ல் plan / காலத்தைத் தேர்வு செய்து invoice வழிமுறையைப் பின்பற்றவும். செலுத்தும்முன் amount / recipient பார்க்கவும்.\nScreenshot மட்டும் approval உறுதி அல்ல. Approval பின் My Plan பார்க்கவும். Pending என்றால் invoice/payment reference உடன் Support தொடர்புகொள்ளவும்; தாமதத்திற்காக மீண்டும் பணம் செலுத்தாதீர்கள். OTP / banking password பகிராதீர்கள்.')
+            rows = [[InlineKeyboardButton('📊 My Plan',callback_data='account_plan_menu')]]
+            if support_row():rows.append(support_row())
+        rows.append([InlineKeyboardButton('🏠 Home',callback_data='home_menu')])
+        await query.message.reply_text(body, parse_mode=ParseMode.DISABLED, reply_markup=InlineKeyboardMarkup(rows))
+        return True
     if data.startswith('job:'):
         _, action, jid = data.split(':',2)
         jid, _, token = jid.partition(':')
@@ -3628,23 +3639,9 @@ async def start_cmd(client, message: Message):
     CLONE_INPUTS.discard(user_id)
 
     keyboard_rows = [
-        [
-            InlineKeyboardButton("📥 Single", callback_data="save_single"),
-            InlineKeyboardButton("📦 Batch", callback_data="batch_new"),
-            InlineKeyboardButton("♻️ Clone", callback_data="save_clone"),
-        ],
-        [
-            InlineKeyboardButton("🔐 Login", callback_data="login_menu"),
-            InlineKeyboardButton("📊 My Plan", callback_data="my_plan"),
-        ],
-        [
-            InlineKeyboardButton("⚙️ Settings", callback_data="settings_menu"),
-            InlineKeyboardButton("🛒 Plans", callback_data="plans_menu"),
-        ],
-        [
-            InlineKeyboardButton("🌐 Language", callback_data="language_menu"),
-            InlineKeyboardButton("❓ Help", callback_data="help_menu"),
-        ],
+        [InlineKeyboardButton('📥 Download', callback_data='download_menu'), InlineKeyboardButton('📦 Batch', callback_data='batch_new')],
+        [InlineKeyboardButton('📊 My Plan / Trial', callback_data='account_plan_menu'), InlineKeyboardButton('⚙ Settings', callback_data='settings_menu')],
+        [InlineKeyboardButton('❓ Help', callback_data='help_menu')],
     ]
 
     row = support_row()
@@ -3654,35 +3651,10 @@ async def start_cmd(client, message: Message):
     if is_admin(user_id):
         keyboard_rows.append([InlineKeyboardButton("🛡 Admin Panel", callback_data="admin_panel")])
 
-    keyboard_rows.insert(1, [InlineKeyboardButton("🎁 Trial / Free Balance", callback_data="free_trial")])
     plan = "💎 Admin Unlimited" if is_admin(user_id) else PLAN_TITLES.get(effective_plan(user_id), "Free")
-    text = tr(
-        user_id,
-        "🌟 **Welcome to SavePro**\n\n"
-        f"🏷 Your plan: **{plan}**\n\n"
-        "📥 **One file:** paste a Telegram post link.\n"
-        "📦 **Batch:** choose a start link and count or end link.\n"
-        "♻️ **Clone:** process posts from your chosen starting link.\n\n"
-        "✨ Personalize captions, thumbnails and audio title/artist in Settings.\n\n"
-        "**Get started**\n1. Connect your Telegram account using Login.\n"
-        "2. Send a link your account can access.\n"
-        "3. Receive files and one final results summary.\n\n"
-        "🆓 Free Access shows your daily balance; Plans shows paid features and limits.\n"
-        "⏳ Telegram waits may apply. Keep the job running; it continues automatically.\n"
-        "Need help? Tap Help or Support.",
-        "🌟 **SavePro-க்கு வரவேற்கிறோம்**\n\n"
-        f"🏷 உங்கள் plan: **{plan}**\n\n"
-        "📥 **Single:** ஒரு Telegram post link அனுப்புங்கள்.\n"
-        "📦 **Batch:** start link + count அல்லது end link தேர்வு செய்யுங்கள்.\n"
-        "♻️ **Clone:** தேர்ந்தெடுத்த starting link-லிருந்து posts பெறுங்கள்.\n\n"
-        "✨ Settings-ல் caption, thumbnail, audio title/artist மாற்றலாம்.\n\n"
-        "**தொடங்குவது எப்படி?**\n1. Login மூலம் உங்கள் Telegram account connect செய்யுங்கள்.\n"
-        "2. உங்கள் account access உள்ள link அனுப்புங்கள்.\n"
-        "3. Files மற்றும் கடைசியில் ஒரு results summary கிடைக்கும்.\n\n"
-        "🆓 Free Access-ல் daily balance; Plans-ல் paid features மற்றும் limits பார்க்கலாம்.\n"
-        "⏳ Telegram wait வந்தால் job தானாகத் தொடரும். மீண்டும் start செய்ய வேண்டாம்.\n"
-        "உதவிக்கு Help அல்லது Support தேர்வு செய்யுங்கள்.",
-    )
+    text = tr(user_id,
+        f"🌟 Welcome to SavePro\nYour plan: {plan}\n\nPaste one Telegram post link, or tap Download to get started.\nBatch saves several posts in order.\nMy Plan shows trial, daily balance, prices and expiry.\nSettings controls branding, language and privacy.\n\nTelegram waits may apply; /status shows progress.",
+        f"🌟 SavePro-க்கு வரவேற்கிறோம்\nஉங்கள் plan: {plan}\n\nஒரு Telegram post link அனுப்புங்கள் அல்லது Download தேர்வு செய்யுங்கள்.\nBatch மூலம் பல posts-ஐ வரிசையாகச் சேமிக்கலாம்.\nMy Plan-ல் trial, balance, விலை, expiry பார்க்கலாம்.\nSettings-ல் branding, மொழி, privacy மாற்றலாம்.\n\nTelegram wait வரலாம்; /status மூலம் நிலையைப் பார்க்கலாம்.")
 
     await message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard_rows))
 
@@ -4551,7 +4523,7 @@ async def callback_handler(client, query: CallbackQuery):
         return
 
     if query.data == "my_plan":
-        await query.message.reply_text(subscription_text(user_id))
+        await query.message.reply_text(subscription_text(user_id), reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🛒 Plans",callback_data="plans_menu"),InlineKeyboardButton("🏠 Home",callback_data="home_menu")]]))
         return
 
     if query.data.startswith("plan:"):
