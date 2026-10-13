@@ -2,7 +2,7 @@
 # Python 3.10+; existing Pyrogram-compatible environment required.
 # Added: isolated jobs, cancel/pause/resume, history, atomic payment review.
 import os
-BOT_VERSION = "2026.10.13-plan-buttons11"
+BOT_VERSION = "2026.10.13-user-directory12"
 import re
 import asyncio
 import time
@@ -3837,7 +3837,10 @@ async def show_user_directory(message, page=0, category='all', search=''):
         where += ' AND (CAST(u.user_id AS TEXT)=? OR LOWER(COALESCE(u.username,\'\')) LIKE ? OR LOWER(COALESCE(u.first_name,\'\')) LIKE ?)'
         params += [search,'%'+search.lower().lstrip('@')+'%','%'+search.lower()+'%']
     with db_conn() as con:
-        rows=con.execute('SELECT u.user_id,u.first_name,u.username FROM users u LEFT JOIN subscriptions s ON s.user_id=u.user_id WHERE '+where+' ORDER BY u.last_seen DESC LIMIT 11 OFFSET ?',(*params,page*10)).fetchall()
+        total=con.execute('SELECT COUNT(*) FROM users u LEFT JOIN subscriptions s ON s.user_id=u.user_id WHERE '+where,params).fetchone()[0]
+        pages=max(1,(total+9)//10)
+        page=min(page,pages-1)
+        rows=con.execute('SELECT u.user_id,u.first_name,u.username,u.banned,s.plan,s.expires_at FROM users u LEFT JOIN subscriptions s ON s.user_id=u.user_id WHERE '+where+' ORDER BY u.last_seen DESC,u.user_id DESC LIMIT 11 OFFSET ?',(*params,page*10)).fetchall()
     buttons=[[InlineKeyboardButton(f"{r['first_name'] or r['username'] or 'User'} • {r['user_id']}"[:60],callback_data=f"au:profile:{r['user_id']}")] for r in rows[:10]]
     nav=[]
     if not search:
@@ -3845,7 +3848,21 @@ async def show_user_directory(message, page=0, category='all', search=''):
         if len(rows)>10:nav.append(InlineKeyboardButton('Next ➡',callback_data=f'au:list:{category}:{page+1}'))
     if nav:buttons.append(nav)
     buttons += [[InlineKeyboardButton(label,callback_data=f'au:list:{key}:0') for label,key in [('All','all'),('Active','active'),('Expired','expired'),('Banned','banned')]], [InlineKeyboardButton('🛡 Admin',callback_data='admin_panel')]]
-    await message.reply_text(f"👥 Users • {category.title()} • Page {page+1}\nSearch: /users NAME or /users TELEGRAM_ID\n"+('Choose a user.' if rows else 'No matching registered users.')+('\nSearch shows up to 10 matches; narrow your search if needed.' if search else ''),reply_markup=InlineKeyboardMarkup(buttons),parse_mode=ParseMode.DISABLED)
+    details=[]
+    for index,r in enumerate(rows[:10],page*10+1):
+        active=bool(r['expires_at'] and r['expires_at']>now)
+        label='Admin Unlimited' if is_admin(r['user_id']) else r['plan'] if active else 'Free'
+        expiry=datetime.fromtimestamp(r['expires_at'],timezone.utc).strftime('%d %b %Y') if r['expires_at'] else '—'
+        state='Banned' if r['banned'] else 'Expired' if r['expires_at'] and not active else 'Active' if active else 'Free'
+        details.append(f"{index}. {(r['first_name'] or 'User')[:60]} • @{(r['username'] or 'none')[:40]}\nID: {r['user_id']} • Plan: {label} • {state}\nSubscription expiry (UTC): {expiry}")
+    await message.reply_text(
+        f"👥 Users • {category.title()} • {total} matches • Page {page+1}/{pages}\n"
+        "Search: /users NAME or /users TELEGRAM_ID\n\n"+
+        ('\n\n'.join(details) if details else 'No matching registered users.')+
+        '\n\nChoose a user below for full details, payments and plan activation.'+
+        ('\nSearch shows up to 10 matches; narrow your search if needed.' if search else ''),
+        reply_markup=InlineKeyboardMarkup(buttons),parse_mode=ParseMode.DISABLED)
+
 
 async def show_user_profile(message, target):
     with db_conn() as con:
@@ -3902,7 +3919,7 @@ async def admin_users_callback(client,query):
             rows=[[InlineKeyboardButton(p.title(),callback_data=f'au:days:{target}:replace:{p}')] for p in DEFAULT_PLAN_PRICES]
         elif action=='days':
             mode,plan=parts[3:5]
-            rows=[[InlineKeyboardButton(f'{days} days',callback_data=f'au:prepare:{target}:{mode}:{plan}:{days}') for days in (7,30)], [InlineKeyboardButton('365 days',callback_data=f'au:prepare:{target}:{mode}:{plan}:365')]]
+            rows=[[InlineKeyboardButton(f"{'Weekly' if days == 7 else 'Monthly'} • {days} days",callback_data=f'au:prepare:{target}:{mode}:{plan}:{days}') for days in (7,30)], [InlineKeyboardButton('Yearly • 365 days',callback_data=f'au:prepare:{target}:{mode}:{plan}:365')]]
         elif action=='prepare':
             mode,plan,days=parts[3:6];days=int(days)
             token=secrets.token_hex(5)
@@ -4025,7 +4042,8 @@ async def show_admin_panel(chat_id: int):
     maintenance = setting_get("maintenance", "0") == "1"
     text = (
         "🛡 **ADMIN PANEL**\n\n"
-        f"👥 Users: `{users}`\n"
+        f"👥 Registered users: `{users}`\n"
+        "Tap View All Users below, or send /users to open their details.\n"
         f"💳 Active subscriptions: `{active}`\n"
         f"🧾 Pending payments: `{pending}`\n"
         f"💰 Payments: `{'ON' if payments else 'OFF'}`\n"
@@ -4042,7 +4060,7 @@ async def show_admin_panel(chat_id: int):
         "`/archivechannel -100CHANNEL_ID` • `/archivechannel off`"
     )
     kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("👥 All Users / User Details", callback_data="au:list:all:0")],
+        [InlineKeyboardButton("👥 View All Users • Full Details", callback_data="au:list:all:0")],
         [
             InlineKeyboardButton("🧾 Pending", callback_data="admin_pending"),
             InlineKeyboardButton("💵 Plan Prices", callback_data="admin_plans"),
