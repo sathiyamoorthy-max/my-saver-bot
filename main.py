@@ -2,7 +2,7 @@
 # Python 3.10+; existing Pyrogram-compatible environment required.
 # Added: isolated jobs, cancel/pause/resume, history, atomic payment review.
 import os
-BOT_VERSION = "2026.10.13-user-directory12"
+BOT_VERSION = "2026.10.13-public-safety13"
 import re
 import asyncio
 import time
@@ -199,6 +199,7 @@ def db_conn():
 def init_db():
     with db_conn() as con:
         con.execute("PRAGMA journal_mode=WAL")
+        con.execute("CREATE TABLE IF NOT EXISTS user_trials(user_id INTEGER PRIMARY KEY, started_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, used INTEGER NOT NULL DEFAULT 0)")
         con.execute("CREATE TABLE IF NOT EXISTS admin_audit(id INTEGER PRIMARY KEY AUTOINCREMENT,actor INTEGER NOT NULL,target INTEGER NOT NULL,action TEXT NOT NULL,detail TEXT NOT NULL,created_at INTEGER NOT NULL)")
         con.execute("""CREATE TABLE IF NOT EXISTS jobs (
             job_id TEXT PRIMARY KEY, user_id INTEGER NOT NULL, kind TEXT NOT NULL,
@@ -416,7 +417,27 @@ def active_subscription(user_id: int):
         ).fetchone()
     if row and row["expires_at"] > now:
         return {"plan": row["plan"], "expires_at": row["expires_at"], "admin": False}
+    with db_conn() as con:
+        trial = con.execute('SELECT expires_at FROM user_trials WHERE user_id=?', (user_id,)).fetchone()
+    if trial and trial['expires_at'] > now:
+        return {'plan': 'standard', 'expires_at': trial['expires_at'], 'admin': False, 'trial': True}
     return None
+
+def activate_trial(uid):
+    now = int(time.time())
+    with db_conn() as con:
+        con.execute('BEGIN IMMEDIATE')
+        user = con.execute('SELECT banned FROM users WHERE user_id=?', (uid,)).fetchone()
+        paid = con.execute('SELECT expires_at FROM subscriptions WHERE user_id=?', (uid,)).fetchone()
+        if not user or user['banned'] or is_admin(uid) or setting_get('maintenance', '0') == '1':
+            return 'Trial unavailable for this account right now.'
+        if paid and paid['expires_at'] > now:
+            return 'Your paid plan is already active; it has not been changed.'
+        existing = con.execute('SELECT expires_at FROM user_trials WHERE user_id=?', (uid,)).fetchone()
+        if existing:
+            return 'Your trial is already active. /myplan' if existing['expires_at'] > now else 'Your one-time trial has ended. Free daily saves remain available. /plans'
+        con.execute('INSERT INTO user_trials(user_id,started_at,expires_at) VALUES(?,?,?)', (uid,now,now+86400))
+    return '🎁 24-hour trial activated: 20 total saves, Single + Batch. No payment or automatic renewal. /myplan'
 
 def effective_plan(user_id: int) -> str:
     sub = active_subscription(user_id)
@@ -463,6 +484,11 @@ def batch_limit_text(user_id: int):
 def remaining_quota(user_id: int):
     if is_admin(user_id):
         return None
+    sub = active_subscription(user_id)
+    if sub and sub.get('trial'):
+        with db_conn() as con:
+            used = con.execute('SELECT used FROM user_trials WHERE user_id=?', (user_id,)).fetchone()[0]
+        return max(0, 20 - used)
     plan = effective_plan(user_id)
     limit = get_daily_limit(plan)
     if limit == 0:
@@ -472,6 +498,11 @@ def remaining_quota(user_id: int):
 
 def consume_usage(user_id: int, count: int = 1):
     if is_admin(user_id):
+        return
+    sub = active_subscription(user_id)
+    if sub and sub.get('trial'):
+        with db_conn() as con:
+            con.execute('UPDATE user_trials SET used=used+? WHERE user_id=?', (max(0,int(count)), user_id))
         return
     plan = effective_plan(user_id)
     if get_daily_limit(plan) == 0:
@@ -506,6 +537,9 @@ def feature_allowed(user_id: int, feature: str, requested: int = 1):
 
     left = remaining_quota(user_id)
     if left is not None and requested > left:
+        sub = active_subscription(user_id)
+        if sub and sub.get('trial'):
+            return False, tr(user_id, f'Trial saves insufficient: {left} left of 20 total. No daily refill during trial. /myplan or /plans', f'Trial saves போதவில்லை: மொத்தம் 20-ல் {left} மீதம். Trial-ல் தினசரி refill இல்லை. /myplan அல்லது /plans')
         return False, tr(
             user_id,
             f"⚠️ Today's saves are finished or insufficient. Remaining: {left}. Resets at 00:00 UTC (05:30 IST). /trial for details or /plans to upgrade.",
@@ -852,6 +886,7 @@ def settings_keyboard(user_id: int):
         [InlineKeyboardButton(f"✨ Quick Setup{lock('audio')}", callback_data="brand:start")],
         [InlineKeyboardButton("❓ Settings Guide", callback_data="settings_guide")],
         [InlineKeyboardButton("📁 Owner Copy / Privacy", callback_data="archive:menu")],
+        [InlineKeyboardButton("🛡 Safety / Privacy Help", callback_data="safety:menu")],
         [
             InlineKeyboardButton(f"✍️ Caption{lock('caption')}", callback_data="cust:caption"),
             InlineKeyboardButton(f"🏷 Watermark{lock('watermark')}", callback_data="cust:watermark"),
@@ -1301,6 +1336,9 @@ def subscription_text(user_id: int) -> str:
         return tr(user_id,
             "💎 Admin • Lifetime unlimited\nSingle / Batch / Clone: no bot quota or batch cap.\nTelegram rate-limit waits still apply; transfers continue automatically after the wait.",
             "💎 Admin • Lifetime unlimited\nSingle / Batch / Clone: bot quota / batch cap இல்லை.\nTelegram விதிக்கும் wait பொருந்தும்; wait முடிந்ததும் transfer தானாகத் தொடரும்.")
+    elif sub and sub.get('trial'):
+        expiry = datetime.fromtimestamp(sub['expires_at'], timezone.utc).strftime('%d-%m-%Y %H:%M UTC')
+        return f"🎁 24-hour trial\nSingle + Batch • Standard features\nRemaining trial saves: {left}/20\nEnds: {expiry}\nClone/Range require Ultimate. No automatic renewal.\nTelegram rate-limit waits still apply."
     elif sub:
         expiry = datetime.fromtimestamp(sub["expires_at"], timezone.utc).strftime("%d-%m-%Y %H:%M UTC")
     else:
@@ -3286,6 +3324,14 @@ async def handle_new_callback(client, query):
         await admin_users_callback(client, query)
         return True
     uid, data = query.from_user.id, query.data or ''
+    if data == 'trial:activate':
+        await query.answer()
+        await query.message.reply_text(activate_trial(uid))
+        return True
+    if data == 'safety:menu':
+        await query.answer()
+        await safety_cmd(client, query.message)
+        return True
     if data.startswith('job:'):
         _, action, jid = data.split(':',2)
         jid, _, token = jid.partition(':')
@@ -3462,6 +3508,9 @@ async def job_control_cmd(client, message: Message):
     )
 
 def free_trial_text(uid):
+    sub = active_subscription(uid)
+    if sub and sub.get('trial'):
+        return subscription_text(uid)
     plan = effective_plan(uid)
     remaining = remaining_quota(uid)
     if is_admin(uid) or plan != 'free':
@@ -3477,8 +3526,20 @@ def free_trial_text(uid):
 async def trial_cmd(client, message):
     uid = message.chat.id
     allowed, reason = feature_allowed(uid, 'single', 0)
-    await message.reply_text(free_trial_text(uid) if allowed else reason,
-                             reply_markup=login_keyboard() if allowed and not has_personal_session(uid) else support_markup())
+    await message.reply_text((free_trial_text(uid) + tr(uid,
+        "\n\nOptional one-time trial: 24 hours from activation, 20 total saves, Single + Batch / Standard features. Clone/Range excluded. No payment or automatic renewal. An existing paid plan is unchanged.",
+        "\n\nவிருப்ப trial: ஒருமுறை, activate செய்ததிலிருந்து 24 மணி நேரம், மொத்தம் 20 saves, Single + Batch / Standard features. Clone/Range இல்லை. Payment / auto-renewal இல்லை. Paid plan மாறாது.")) if allowed else reason,
+                             reply_markup=InlineKeyboardMarkup([
+                                 [InlineKeyboardButton('🎁 Activate 24-hour trial • 20 saves', callback_data='trial:activate')],
+                                 [InlineKeyboardButton('🔐 Login', callback_data='login_menu'), InlineKeyboardButton('📊 My Plan', callback_data='my_plan')],
+                                 [InlineKeyboardButton('🏠 Home', callback_data='home_menu')]]) if allowed else support_markup())
+
+@bot.on_message(filters.command("safety") & filters.private)
+async def safety_cmd(client, message):
+    await message.reply_text(tr(message.chat.id,
+        "🛡 Safety & Privacy\nUse files you own or have permission to save. Your connected account needs access to the source.\nOwner Copy is optional: Settings → Owner Copy shows the destination and consent controls. Turning it off stops future copies; existing copies remain.\nAdmins can view profile, plan, usage and payment records; OTP/password/session strings must never be sent to admins.\nDisconnect your account through Login → Logout. Check Telegram Settings → Devices to revoke a server session.\nNever reuse the same session string across running servers.\nUnlimited means no bot daily quota, not exemption from Telegram limits. Waits resume automatically; /status shows the current stage.\nIf delivery is uncertain, check your chat before retrying to avoid duplicates.",
+        "🛡 பாதுகாப்பு / Privacy\nஉங்களுடைய அல்லது சேமிக்க அனுமதி உள்ள files மட்டும் பயன்படுத்துங்கள். Source-க்கு உங்கள் account-ல் access தேவை.\nOwner Copy விருப்பத் தேர்வு: Settings → Owner Copy-ல் channel மற்றும் consent பார்க்கலாம். OFF செய்தால் இனிவரும் copies நிற்கும்; பழைய copies நீங்காது.\nAdmin-க்கு profile, plan, usage, payment விவரங்கள் தெரியும். OTP/password/session string-ஐ admin-க்கு அனுப்பாதீர்கள்.\nLogin → Logout மூலம் disconnect செய்யலாம். Telegram Settings → Devices-ல் server session-ஐ revoke செய்யலாம்.\nஒரே session string-ஐ பல running servers-ல் பயன்படுத்தாதீர்கள்.\nUnlimited plan-க்கும் Telegram limits பொருந்தும். Wait முடிந்ததும் தானாகத் தொடரும்; /status பார்க்கவும்.\nDelivery உறுதி இல்லாவிட்டால் retry முன் chat-ல் file வந்துள்ளதா பாருங்கள்."),
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('📁 Owner Copy',callback_data='archive:menu'),InlineKeyboardButton('🔐 Account',callback_data='login_menu')],[InlineKeyboardButton('🏠 Home',callback_data='home_menu')]]))
 
 @bot.on_message(filters.command("version") & filters.private)
 async def version_cmd(client, message):
@@ -3593,7 +3654,7 @@ async def start_cmd(client, message: Message):
     if is_admin(user_id):
         keyboard_rows.append([InlineKeyboardButton("🛡 Admin Panel", callback_data="admin_panel")])
 
-    keyboard_rows.insert(1, [InlineKeyboardButton("🆓 Free Access / Balance", callback_data="free_trial")])
+    keyboard_rows.insert(1, [InlineKeyboardButton("🎁 Trial / Free Balance", callback_data="free_trial")])
     plan = "💎 Admin Unlimited" if is_admin(user_id) else PLAN_TITLES.get(effective_plan(user_id), "Free")
     text = tr(
         user_id,
@@ -3875,7 +3936,9 @@ async def show_user_profile(message, target):
         return await message.reply_text('User not registered. Ask them to send /start. Use their bot Telegram User ID, not phone number.')
     def stamp(t):return datetime.fromtimestamp(t,timezone.utc).strftime('%d %b %Y %H:%M UTC')
     now=int(time.time()); plan=effective_plan(target)
-    status='Admin unlimited' if is_admin(target) else 'Active' if sub and sub['expires_at']>now else 'Expired' if sub else 'Free'
+    entitlement=active_subscription(target)
+    if entitlement and entitlement.get('trial'):sub=entitlement
+    status='Admin unlimited' if is_admin(target) else '24-hour trial' if entitlement and entitlement.get('trial') else 'Active' if sub and sub['expires_at']>now else 'Expired' if sub else 'Free'
     text=(f"👤 {u['first_name'] or 'User'} • @{u['username'] or 'none'}\nBot User ID: {target}\n"
           f"Connected account ID: {setting_get(f'connected.id.{target}', 'Not recorded; reconnect to record')}\n"
           f"Joined: {stamp(u['created_at'])}\nLast active: {stamp(u['last_seen'])}\n"
@@ -3893,7 +3956,7 @@ async def show_user_profile(message, target):
         [InlineKeyboardButton('🥇 Activate Premium', callback_data=f'au:days:{target}:replace:premium'),
          InlineKeyboardButton('💎 Activate Ultimate', callback_data=f'au:days:{target}:replace:ultimate')],
     ]
-    if sub and sub['expires_at']>now:rows.append([InlineKeyboardButton('➕ Add Days',callback_data=f"au:days:{target}:extend:{sub['plan']}")])
+    if sub and not (entitlement and entitlement.get('trial')) and sub['expires_at']>now:rows.append([InlineKeyboardButton('➕ Add Days',callback_data=f"au:days:{target}:extend:{sub['plan']}")])
     rows += [[InlineKeyboardButton('🆓 Set Free / Revoke',callback_data=f'au:prepare:{target}:revoke:-:0'),InlineKeyboardButton('Unban' if u['banned'] else 'Ban',callback_data=f"au:prepare:{target}:{'unban' if u['banned'] else 'ban'}:-:0")], [InlineKeyboardButton('👥 Users',callback_data='au:list:all:0')]]
     await message.reply_text(text,parse_mode=ParseMode.DISABLED,reply_markup=InlineKeyboardMarkup(rows))
 
@@ -4076,6 +4139,8 @@ async def show_admin_panel(chat_id: int):
 @bot.on_callback_query()
 async def callback_handler(client, query: CallbackQuery):
     user_id = query.from_user.id
+    if not query.message or query.message.chat.id != user_id:
+        return await query.answer('Open a private chat with this bot to manage your account.', show_alert=True)
     touch_query_user(query)
     if await handle_new_callback(client, query):
         return
